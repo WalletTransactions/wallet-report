@@ -50,8 +50,8 @@ bash run_local.sh
 прогоняет его. Повторные запуски быстрее — слои и база переиспользуются, а
 тесты не требуют очистки между прогонами (см. "Изоляция" выше).
 
-Гоняется автоматически перед коммитом, если правится `wallet-api/schema/` или
-миграции — см. [`../../../scripts/hooks/README.md`](https://github.com/WalletTransactions/wallet-api/blob/main/scripts/hooks/README.md).
+Запускать вручную перед коммитом, который правит схему или миграции
+`wallet-api` (или Jenkins-job `wallet-report-integration-tests`).
 
 ### Вручную (тот же результат другим способом)
 
