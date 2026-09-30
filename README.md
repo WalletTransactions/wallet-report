@@ -1,7 +1,7 @@
 # wallet-report
 
 Сервис отчётов — CQRS-lite query-сторона, выделенная из
-[wallet-api](https://github.com/WalletTransactions/wallet-api/tree/main/.) 2026-09-08 (см. "История" ниже). Читает ТУ ЖЕ
+[wallet-api](https://github.com/WalletTransactions/wallet-api) 2026-09-08 (см. "История" ниже). Читает ТУ ЖЕ
 Postgres-базу, что и wallet-api, но отдельным процессом и ЕДИНСТВЕННОЙ
 read-only ролью — токен не выпускает и не ротирует, только проверяет JWT по
 JWKS `google-auth`, тем же приёмом, что wallet-api/wallet-gateway.
@@ -144,8 +144,8 @@ SPA (`../wallet-web/site/app.js::renderAdmin()`) сшивает `GET
 
 ## Как проверяется токен (без своего OAuth)
 
-Ровно тот же приём, что в [wallet-api](https://github.com/WalletTransactions/wallet-api/tree/main/.)/
-[wallet-gateway](https://github.com/WalletTransactions/wallet-gateway/tree/main/.):
+Ровно тот же приём, что в [wallet-api](https://github.com/WalletTransactions/wallet-api)/
+[wallet-gateway](https://github.com/WalletTransactions/wallet-gateway):
 
 1. Читает токен — сначала заголовок `Authorization: Bearer`, иначе cookie
    `session` (см. `session.hpp`).
@@ -159,7 +159,7 @@ SPA (`../wallet-web/site/app.js::renderAdmin()`) сшивает `GET
 
 ## Доступ через гейтвей
 
-[wallet-gateway](https://github.com/WalletTransactions/wallet-gateway/tree/main/.) маршрутизирует `/api/reports/*` сюда, а
+[wallet-gateway](https://github.com/WalletTransactions/wallet-gateway) маршрутизирует `/api/reports/*` сюда, а
 остальной `/api/*` (`/api/wallets`) и `/sync/*` — по-прежнему на wallet-api
 (см. его README и `WALLET_REPORT_API_URL`/`WALLET_API_URL` в `.env`
 гейтвея). Прямой поход в порт wallet-report (минуя гейтвей) всё ещё работает
