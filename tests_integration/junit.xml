@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="wallet_report_integration_tests" tests="30" failures="0" time="4.1467">
+  <testcase classname="wallet_report_integration_tests" name="find_ledger_for_user_returns_nullopt_for_unknown_user" time="0.0386574"/>
+  <testcase classname="wallet_report_integration_tests" name="resolve_eq_currency_returns_nullopt_for_unknown_iso_code" time="0.117896"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_to_date_reflects_seeded_operation" time="0.259426"/>
+  <testcase classname="wallet_report_integration_tests" name="income_for_period_reflects_seeded_operation" time="0.215116"/>
+  <testcase classname="wallet_report_integration_tests" name="income_and_expense_for_period_net_cross_currency_transfer_legs" time="0.156123"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_sums_across_currencies_unlike_expense_for_period" time="0.174248"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_nets_cross_currency_transfer_legs" time="0.134808"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_computes_pct_without_comparison" time="0.145842"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_with_comparison_reports_pp_delta_and_dropped_category" time="0.139513"/>
+  <testcase classname="wallet_report_integration_tests" name="income_expense_by_month_zero_fills_months_without_activity" time="0.130988"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_weekday_zero_fills_days_without_expense" time="0.133812"/>
+  <testcase classname="wallet_report_integration_tests" name="expense_biggest_moves_ranks_by_absolute_delta_desc_and_respects_limit" time="0.193958"/>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_classifies_kind_and_fills_category_or_wallet_by_side" time="0.121987"/>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_pages_through_cursor_without_gaps_or_duplicates" time="0.194105"/>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_incomplete_is_scoped_to_the_page" time="0.15875"/>
+  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_counts_transfers_and_zero_fills_untouched_wallet" time="0.146273"/>
+  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_includes_both_boundary_dates" time="0.143401"/>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_returns_one_block_per_date_in_order_including_empty_ones" time="0.12221"/>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_excludes_operation_exactly_on_the_requested_date" time="0.112081"/>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_handles_duplicate_dates_in_request" time="0.202411"/>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_marks_incomplete_when_rate_missing_for_one_wallet" time="0.0940069"/>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_orders_accounts_within_one_date_by_eq_desc" time="0.104116"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_zero_fills_buckets_including_one_before_first_operation" time="0.120977"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_excludes_operation_exactly_on_bucket_boundary" time="0.112536"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_marks_incomplete_only_for_buckets_with_accounts" time="0.128108"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_orders_accounts_within_one_bucket_by_eq_desc" time="0.0975211"/>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_totals_only_matches_per_account_totals" time="0.109089"/>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_includes_ledger_currency" time="0.0775767"/>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_without_ledger_returns_only_reference" time="0.125822"/>
+  <testcase classname="wallet_report_integration_tests" name="list_accounts_splits_by_account_operating_and_filters_archived" time="0.135342"/>
+</testsuite>

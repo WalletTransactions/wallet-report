@@ -1,0 +1,719 @@
+#include "reports_repo.hpp"
+
+#include <algorithm>
+#include <cstdio>
+#include <unordered_map>
+#include <unordered_set>
+
+using nlohmann::json;
+
+namespace reports_repo {
+
+namespace {
+
+// Одна строка результата функции — в JSON по имени колонки, не по позиции
+// (порядок в SQL и в columns обязан совпадать, но так опечатка в одном
+// месте не молча сдвинет значения по другим ключам).
+json row_to_json(const std::vector<std::string>& fields, const std::vector<std::string>& columns) {
+    json row = json::object();
+    for (std::size_t i = 0; i < columns.size(); ++i) row[columns[i]] = fields.at(i);
+    return row;
+}
+
+} // namespace
+
+std::optional<std::string> find_ledger_for_user(db::Database& db, const std::string& user_id) {
+    auto res = db.exec(
+        "SELECT ledger_id FROM ledger_member WHERE user_id = $1 ORDER BY joined_at LIMIT 1",
+        {user_id});
+    if (res.rows.empty()) return std::nullopt;
+    return res.rows[0].fields.at(0);
+}
+
+std::optional<std::string> resolve_eq_currency(db::Database& db, const std::string& iso_code,
+                                                const std::string& ledger_id) {
+    auto res = db.exec(
+        "SELECT uuid FROM currency WHERE iso_code = $1 AND deleted_at IS NULL "
+        "AND (ledger_id IS NULL OR ledger_id = $2) "
+        "ORDER BY (ledger_id IS NULL) LIMIT 1",
+        {iso_code, ledger_id});
+    if (res.rows.empty()) return std::nullopt;
+    return res.rows[0].fields.at(0);
+}
+
+CurrenciesResult list_currencies(db::Database& db, const std::string& ledger_id) {
+    // DISTINCT ON (iso_code) ... ORDER BY iso_code, (ledger_id IS NULL) —
+    // тот же приоритет "своя строка вместо общей при совпадении кода", что и
+    // resolve_eq_currency выше, только сразу для целого списка: (ledger_id
+    // IS NULL) = false (своя) сортируется ПЕРЕД true (общая), значит
+    // DISTINCT ON оставляет для этого iso_code именно свою строку.
+    //
+    // JOIN icon — по прямому запросу ("флаг страны" в выпадающем списке):
+    // currency.icon_uuid NOT NULL REFERENCES icon(uuid) (см. table/currency.sql,
+    // "Иконка-флаг/символ этой валюты" — комментарий колонки буквально про
+    // это), значит иконка есть гарантированно, JOIN, не LEFT JOIN. Сама
+    // картинка — в blob.sha256 (icon.content_sha256), которую веб-клиент
+    // качает как есть через уже существующий GET /sync/blobs/:sha256; hex —
+    // тот же приём (encode(...,'hex')), что и icon_sha256 в
+    // f_expanse_by_category_for_period.sql у категорий.
+    //
+    // Без леджера (ledger_id пуст, см. .hpp) — отдельный текст запроса без
+    // параметра вовсе: $2, типизированный контекстом как uuid, не принял бы
+    // пустую строку (см. остальные функции файла, почему они не вызываются
+    // с пустым ledger_id вовсе, а не в том, что не пытались).
+    auto res = ledger_id.empty()
+        ? db.exec(
+              "SELECT c.uuid, c.iso_code, c.name, c.symbol, encode(i.content_sha256, 'hex') "
+              "FROM currency c JOIN icon i ON i.uuid = c.icon_uuid "
+              "WHERE c.deleted_at IS NULL AND c.ledger_id IS NULL "
+              "ORDER BY c.iso_code")
+        : db.exec(
+              "SELECT DISTINCT ON (c.iso_code) c.uuid, c.iso_code, c.name, c.symbol, "
+              "encode(i.content_sha256, 'hex') "
+              "FROM currency c JOIN icon i ON i.uuid = c.icon_uuid "
+              "WHERE c.deleted_at IS NULL AND (c.ledger_id IS NULL OR c.ledger_id = $1) "
+              "ORDER BY c.iso_code, (c.ledger_id IS NULL)",
+              {ledger_id});
+
+    CurrenciesResult result;
+    static const std::vector<std::string> kColumns = {"uuid", "iso_code", "name", "symbol", "icon_sha256"};
+    for (const auto& row : res.rows) result.currencies.push_back(row_to_json(row.fields, kColumns));
+    return result;
+}
+
+AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, AccountKindFilter kind,
+                             bool include_archived) {
+    // Фильтры — параметрами ($2/$3), а не склейкой текста запроса: один план
+    // на все сочетания, и никакой ветки, где значение попадает в SQL строкой.
+    // LEFT JOIN currency — валюта кошелька; у категории её нет. Удалённая
+    // валюта (deleted_at) не прячет кошелёк: он живой и участвует в расчётах,
+    // просто iso_code/symbol берутся как есть из tombstone-строки.
+    std::string kind_param = kind == AccountKindFilter::Wallet     ? "wallet"
+                             : kind == AccountKindFilter::Category ? "category"
+                                                                   : "";
+    auto res = db.exec(
+        "SELECT a.uuid, a.name, "
+        "CASE WHEN ao.uuid IS NULL THEN 'category' ELSE 'wallet' END AS kind, "
+        "a.system_kind, a.is_archived, encode(i.content_sha256, 'hex'), "
+        "ao.currency_uuid, c.iso_code, c.symbol, c.\"precision\" "
+        "FROM account a "
+        "JOIN icon i ON i.uuid = a.icon_uuid "
+        "LEFT JOIN account_operating ao "
+        "  ON ao.ledger_id = a.ledger_id AND ao.uuid = a.uuid AND ao.deleted_at IS NULL "
+        "LEFT JOIN currency c ON c.uuid = ao.currency_uuid "
+        "WHERE a.ledger_id = $1 AND a.deleted_at IS NULL "
+        "AND ($2::text = '' OR ($2::text = 'wallet') = (ao.uuid IS NOT NULL)) "
+        "AND ($3::boolean OR NOT a.is_archived) "
+        "ORDER BY (ao.uuid IS NULL), a.name",
+        {ledger_id, kind_param, include_archived ? "true" : "false"});
+
+    static const std::vector<std::string> kColumns = {
+        "uuid", "name", "kind", "system_kind", "is_archived", "icon_sha256",
+        "currency_uuid", "iso_code", "symbol", "precision",
+    };
+    AccountsResult out;
+    for (const auto& row : res.rows) {
+        json out_row = row_to_json(row.fields, kColumns);
+        // Тот же приём, что is_archived у wallet_turnover_for_period: признаки
+        // — настоящими JSON bool/числом, а не строками "t"/"0".
+        out_row["is_archived"] = row.fields.at(4) == "t";
+        out_row["system_kind"] = std::stoi(row.fields.at(3));
+        out.accounts.push_back(out_row);
+    }
+    return out;
+}
+
+ReportResult balance_to_date(db::Database& db, const std::string& ledger_id,
+                              const std::string& date, const std::string& eq_currency_uuid) {
+    // COALESCE(sum(...) OVER (), 0)/bool_or(...) OVER () — агрегат по ВСЕМУ
+    // результату в каждой строке, без второго похода в базу (см.
+    // reports_repo.hpp).
+    auto result = db.exec(
+        "SELECT account_uuid, account_name, currency_uuid, symbol, \"precision\", "
+        "balance, balance_eq, "
+        "COALESCE(sum(balance_eq) OVER (), 0)::text AS total_eq, "
+        "bool_or(balance_eq IS NULL) OVER () AS incomplete "
+        "FROM f_balance_to_date($1, $2, $3)",
+        {ledger_id, date, eq_currency_uuid});
+
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name", "currency_uuid", "symbol", "precision",
+        "balance",      "balance_eq",
+    };
+    ReportResult out;
+    for (const auto& row : result.rows) out.rows.push_back(row_to_json(row.fields, kColumns));
+    if (!result.rows.empty()) {
+        out.total_eq = result.rows[0].fields.at(7);
+        out.incomplete = result.rows[0].fields.at(8) == "t";
+    }
+    return out;
+}
+
+namespace {
+
+// income/expense устроены одинаково — единственная разница: имя SQL-функции.
+ReportResult period_report(db::Database& db, const std::string& function_name,
+                            const std::string& ledger_id, const std::string& from,
+                            const std::string& to, const std::string& eq_currency_uuid) {
+    std::string sql =
+        "SELECT account_uuid, account_name, currency_uuid, amount, amount_eq, "
+        "COALESCE(sum(amount_eq) OVER (), 0)::text AS total_eq, "
+        "bool_or(amount_eq IS NULL) OVER () AS incomplete "
+        "FROM " +
+        function_name + "($1, $2, $3, $4)";
+    auto result = db.exec(sql, {ledger_id, from, to, eq_currency_uuid});
+
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name", "currency_uuid", "amount", "amount_eq",
+    };
+    ReportResult out;
+    for (const auto& row : result.rows) out.rows.push_back(row_to_json(row.fields, kColumns));
+    if (!result.rows.empty()) {
+        out.total_eq = result.rows[0].fields.at(5);
+        out.incomplete = result.rows[0].fields.at(6) == "t";
+    }
+    return out;
+}
+
+} // namespace
+
+ReportResult income_for_period(db::Database& db, const std::string& ledger_id,
+                                const std::string& from, const std::string& to,
+                                const std::string& eq_currency_uuid) {
+    return period_report(db, "f_income_for_period", ledger_id, from, to, eq_currency_uuid);
+}
+
+ReportResult expense_for_period(db::Database& db, const std::string& ledger_id,
+                                 const std::string& from, const std::string& to,
+                                 const std::string& eq_currency_uuid) {
+    return period_report(db, "f_expanse_for_period", ledger_id, from, to, eq_currency_uuid);
+}
+
+ReportResult expense_by_category_for_period(db::Database& db, const std::string& ledger_id,
+                                              const std::string& from, const std::string& to,
+                                              const std::string& eq_currency_uuid) {
+    // Тот же приём агрегата через OVER(), что и в period_report()/
+    // balance_to_date() выше, но своя реализация, а не переиспользование
+    // period_report(): у f_expanse_by_category_for_period нет колонок
+    // currency_uuid/amount вовсе (см. её .sql — валюты уже смешаны через
+    // amount_eq), под другой набор колонок пришлось бы городить условия в
+    // общей функции ради одного вызывающего.
+    auto result = db.exec(
+        "SELECT account_uuid, account_name, amount_eq, icon_sha256, "
+        "COALESCE(sum(amount_eq) OVER (), 0)::text AS total_eq, "
+        "bool_or(amount_eq IS NULL) OVER () AS incomplete "
+        "FROM f_expanse_by_category_for_period($1, $2, $3, $4)",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    // icon_sha256 — hex-строка content_sha256 иконки категории (см. .sql:
+    // encode(...,'hex') там же, а не здесь — единственный вызывающий, не
+    // общий механизм TableSpec::hex_columns протокола синка). Веб-клиент
+    // собирает по ней URL GET /sync/blobs/:sha256 сам (см. reports_repo.hpp).
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name", "amount_eq", "icon_sha256",
+    };
+    ReportResult out;
+    for (const auto& row : result.rows) out.rows.push_back(row_to_json(row.fields, kColumns));
+    if (!result.rows.empty()) {
+        out.total_eq = result.rows[0].fields.at(4);
+        out.incomplete = result.rows[0].fields.at(5) == "t";
+    }
+    return out;
+}
+
+namespace {
+
+// ""  (SQL NULL, см. db.cpp) -> nullopt; текст, который не парсится как
+// число, тоже nullopt — быть щедрее тут незачем, оба случая рисуются
+// одинаково ("~"/null) на клиенте.
+std::optional<double> parse_opt_double(const std::string& s) {
+    if (s.empty()) return std::nullopt;
+    try {
+        return std::stod(s);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// Один знак после запятой — тот же формат, что и у "п.п." в дизайне
+// (Design/.../Отчёты - веб.dc.html). См. reports_repo.hpp про то, почему
+// double здесь допустим (не деньги, только для интерфейса).
+std::string format_pct(double value) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f", value);
+    return std::string(buf);
+}
+
+} // namespace
+
+StructureResult expense_structure_for_period(db::Database& db, const std::string& ledger_id,
+                                              const std::string& from, const std::string& to,
+                                              const std::string& eq_currency_uuid,
+                                              const std::optional<std::string>& cmp_from,
+                                              const std::optional<std::string>& cmp_to) {
+    StructureResult out;
+
+    auto now_r = expense_by_category_for_period(db, ledger_id, from, to, eq_currency_uuid);
+    out.total_eq = now_r.total_eq;
+    out.incomplete = now_r.incomplete;
+    double total_now = parse_opt_double(now_r.total_eq).value_or(0.0);
+
+    bool has_cmp = cmp_from.has_value() && cmp_to.has_value() && !cmp_from->empty() && !cmp_to->empty();
+
+    // uuid -> amount_eq периода сравнения (nullopt — курса не нашлось, ТА ЖЕ
+    // строка есть, просто её сумму нельзя посчитать; отсутствие ключа вовсе —
+    // категория в cmp-периоде не встречалась, это 0, не "неизвестно").
+    std::unordered_map<std::string, std::optional<double>> before_amount;
+    std::unordered_map<std::string, json> before_row_by_uuid;
+    std::vector<std::string> before_order; // порядок ORDER BY из SQL — для before-only строк ниже
+    double total_before = 0.0;
+
+    if (has_cmp) {
+        auto before_r = expense_by_category_for_period(db, ledger_id, *cmp_from, *cmp_to, eq_currency_uuid);
+        out.compared = true;
+        out.total_eq_before = before_r.total_eq;
+        out.incomplete = out.incomplete || before_r.incomplete;
+        total_before = parse_opt_double(before_r.total_eq).value_or(0.0);
+        for (const auto& row : before_r.rows) {
+            std::string uuid = row.at("account_uuid").get<std::string>();
+            before_amount[uuid] = parse_opt_double(row.at("amount_eq").get<std::string>());
+            before_row_by_uuid[uuid] = row;
+            before_order.push_back(uuid);
+        }
+    }
+
+    std::unordered_set<std::string> seen;
+    for (const auto& row : now_r.rows) {
+        std::string uuid = row.at("account_uuid").get<std::string>();
+        seen.insert(uuid);
+
+        json out_row = row; // account_uuid/account_name/amount_eq как есть
+        auto now_val = parse_opt_double(row.at("amount_eq").get<std::string>());
+        std::optional<double> pct_now =
+            (now_val && total_now > 0.0) ? std::optional<double>(*now_val / total_now * 100.0) : std::nullopt;
+        out_row["pct"] = pct_now ? json(format_pct(*pct_now)) : json(nullptr);
+
+        if (out.compared) {
+            // Категория, которой не было в cmp-периоде вовсе, — это честный 0
+            // (а не "неизвестно"), в отличие от amount_eq == nullopt (курс не
+            // нашёлся) у СУЩЕСТВУЮЩЕЙ строки — см. комментарий у before_amount.
+            auto it = before_amount.find(uuid);
+            std::optional<double> before_val = it != before_amount.end() ? it->second : std::optional<double>(0.0);
+            std::optional<double> pct_before = (before_val && total_before > 0.0)
+                                                    ? std::optional<double>(*before_val / total_before * 100.0)
+                                                    : std::nullopt;
+            out_row["pct_before"] = pct_before ? json(format_pct(*pct_before)) : json(nullptr);
+            out_row["pp_delta"] =
+                (pct_now && pct_before) ? json(format_pct(*pct_now - *pct_before)) : json(nullptr);
+        }
+        out.categories.push_back(out_row);
+    }
+
+    // Категории, которые встречались в cmp-периоде, но пропали в основном, —
+    // без этого прохода "куда делась статья" была бы не видна в сравнении
+    // вообще (см. reports_repo.hpp у StructureResult).
+    if (out.compared) {
+        for (const auto& uuid : before_order) {
+            if (seen.count(uuid)) continue;
+            seen.insert(uuid);
+
+            const auto& before_row = before_row_by_uuid.at(uuid);
+            json out_row = {
+                {"account_uuid", uuid},
+                {"account_name", before_row.at("account_name")},
+                {"amount_eq", "0"},
+                {"icon_sha256", before_row.at("icon_sha256")}, // иконка категории не меняется между периодами
+            };
+            out_row["pct"] = (total_now > 0.0) ? json(format_pct(0.0)) : json(nullptr);
+
+            std::optional<double> before_val = before_amount.at(uuid);
+            std::optional<double> pct_before = (before_val && total_before > 0.0)
+                                                    ? std::optional<double>(*before_val / total_before * 100.0)
+                                                    : std::nullopt;
+            out_row["pct_before"] = pct_before ? json(format_pct(*pct_before)) : json(nullptr);
+            out_row["pp_delta"] = pct_before ? json(format_pct(0.0 - *pct_before)) : json(nullptr);
+            out.categories.push_back(out_row);
+        }
+    }
+
+    return out;
+}
+
+MonthlyResult income_expense_by_month(db::Database& db, const std::string& ledger_id,
+                                       const std::string& from, const std::string& to,
+                                       const std::string& eq_currency_uuid) {
+    auto result = db.exec(
+        "SELECT month_start, income_eq, expense_eq, incomplete "
+        "FROM f_income_expense_by_month($1, $2, $3, $4)",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    MonthlyResult out;
+    for (const auto& row : result.rows) {
+        out.months.push_back({
+            {"month_start", row.fields.at(0)},
+            {"income_eq", row.fields.at(1)},
+            {"expense_eq", row.fields.at(2)},
+        });
+        if (row.fields.at(3) == "t") out.incomplete = true;
+    }
+    return out;
+}
+
+WeekdayResult expense_by_weekday(db::Database& db, const std::string& ledger_id,
+                                  const std::string& from, const std::string& to,
+                                  const std::string& eq_currency_uuid) {
+    auto result = db.exec(
+        "SELECT isodow, expense_eq, incomplete "
+        "FROM f_expense_by_weekday_for_period($1, $2, $3, $4)",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    WeekdayResult out;
+    for (const auto& row : result.rows) {
+        out.days.push_back({
+            {"isodow", std::stoi(row.fields.at(0))},
+            {"expense_eq", row.fields.at(1)},
+        });
+        if (row.fields.at(2) == "t") out.incomplete = true;
+    }
+    return out;
+}
+
+BiggestMovesResult expense_biggest_moves(db::Database& db, const std::string& ledger_id,
+                                          const std::string& from, const std::string& to,
+                                          const std::string& cmp_from, const std::string& cmp_to,
+                                          const std::string& eq_currency_uuid, int limit) {
+    BiggestMovesResult out;
+
+    // Переиспользуем ПЛОСКИЙ список по категории (не expense_structure_for_period
+    // — той нужны проценты от total_eq, здесь важна только абсолютная сумма
+    // каждой категории в обоих периодах) — дважды, тем же приёмом мёржа по
+    // account_uuid, что и структура выше.
+    auto now_r = expense_by_category_for_period(db, ledger_id, from, to, eq_currency_uuid);
+    auto before_r = expense_by_category_for_period(db, ledger_id, cmp_from, cmp_to, eq_currency_uuid);
+    out.incomplete = now_r.incomplete || before_r.incomplete;
+
+    std::unordered_map<std::string, json> before_by_uuid;
+    for (const auto& row : before_r.rows) before_by_uuid[row.at("account_uuid").get<std::string>()] = row;
+
+    struct Candidate {
+        json row;
+        double abs_delta;
+    };
+    std::vector<Candidate> candidates;
+    std::unordered_set<std::string> seen;
+
+    for (const auto& row : now_r.rows) {
+        std::string uuid = row.at("account_uuid").get<std::string>();
+        seen.insert(uuid);
+        std::string now_amt = row.at("amount_eq").get<std::string>();
+        auto it = before_by_uuid.find(uuid);
+        // Категории не было в cmp-периоде вовсе — честный 0, не "неизвестно"
+        // (тот же принцип, что перед этим уже применён в expense_structure_for_period).
+        std::string before_amt = it != before_by_uuid.end() ? it->second.at("amount_eq").get<std::string>() : "0";
+        auto now_v = parse_opt_double(now_amt);
+        auto before_v = parse_opt_double(before_amt);
+        if (!now_v || !before_v) continue; // курса не нашлось хотя бы в одном периоде — дельту не посчитать
+        json out_row = {
+            {"account_uuid", uuid},
+            {"account_name", row.at("account_name")},
+            {"icon_sha256", row.at("icon_sha256")},
+            {"amount_now_eq", now_amt},
+            {"amount_before_eq", before_amt},
+        };
+        candidates.push_back({out_row, std::abs(*now_v - *before_v)});
+    }
+    // Категории, которых нет "сейчас", но были "до" — тоже движение (обнулились).
+    for (const auto& row : before_r.rows) {
+        std::string uuid = row.at("account_uuid").get<std::string>();
+        if (seen.count(uuid)) continue;
+        std::string before_amt = row.at("amount_eq").get<std::string>();
+        auto before_v = parse_opt_double(before_amt);
+        if (!before_v) continue;
+        json out_row = {
+            {"account_uuid", uuid},
+            {"account_name", row.at("account_name")},
+            {"icon_sha256", row.at("icon_sha256")},
+            {"amount_now_eq", "0"},
+            {"amount_before_eq", before_amt},
+        };
+        candidates.push_back({out_row, std::abs(0.0 - *before_v)});
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.abs_delta > b.abs_delta; });
+    if (static_cast<int>(candidates.size()) > limit) candidates.resize(static_cast<std::size_t>(limit));
+    for (const auto& c : candidates) out.rows.push_back(c.row);
+
+    return out;
+}
+
+OperationsResult operations_for_period(db::Database& db, const std::string& ledger_id,
+                                        const std::string& from, const std::string& to,
+                                        const std::string& eq_currency_uuid, int limit,
+                                        const std::string& cursor_date, const std::string& cursor_uuid) {
+    static const char* kSelectColumns =
+        "operation_uuid, \"date\", kind, amount, currency_uuid, symbol, \"precision\", "
+        "amount_eq, comment, category_uuid, category_name, icon_sha256, wallet_uuid, wallet_name, "
+        "from_uuid, from_name, to_uuid, to_name";
+    static const std::vector<std::string> kColumns = {
+        "operation_uuid", "date",         "kind",         "amount",      "currency_uuid",
+        "symbol",         "precision",    "amount_eq",    "comment",     "category_uuid",
+        "category_name",  "icon_sha256",  "wallet_uuid",  "wallet_name", "from_uuid",
+        "from_name",      "to_uuid",      "to_name",
+    };
+    constexpr std::size_t kAmountEqIdx = 7; // индекс "amount_eq" в kColumns — для проверки incomplete
+
+    // +1 — "подглядываем" на одну строку вперёд запрошенного limit: если она
+    // пришла, значит после отданной страницы есть ещё хотя бы одна операция
+    // (has_more), а саму эту лишнюю строку наружу не отдаём (см. take ниже).
+    // Без этого пришлось бы либо отдельным запросом (COUNT/EXISTS) спрашивать
+    // "а дальше есть ещё", либо врать has_more=true даже когда ровно limit
+    // строк и были последними в периоде.
+    std::string fetch_limit = std::to_string(limit + 1);
+
+    db::Result result;
+    if (cursor_date.empty()) {
+        // Первая страница — БЕЗ $6/$7 вовсе (не NULL-параметрами): Postgres
+        // сам подставит DEFAULT NULL у p_cursor_date/p_cursor_uuid (см.
+        // f_operations_for_period.sql) — db::Database::exec() пока не умеет
+        // посылать настоящий SQL NULL через $N (все параметры — непустые
+        // строки, см. db.hpp), тот же приём, что и у resolve_eq_currency с
+        // пустым ledger_id (см. её комментарий в reports_repo.hpp).
+        result = db.exec(std::string("SELECT ") + kSelectColumns +
+                              " FROM f_operations_for_period($1, $2, $3, $4, $5)",
+                          {ledger_id, from, to, eq_currency_uuid, fetch_limit});
+    } else {
+        result = db.exec(std::string("SELECT ") + kSelectColumns +
+                              " FROM f_operations_for_period($1, $2, $3, $4, $5, $6, $7)",
+                          {ledger_id, from, to, eq_currency_uuid, fetch_limit, cursor_date, cursor_uuid});
+    }
+
+    OperationsResult out;
+    std::size_t take = result.rows.size();
+    if (take > static_cast<std::size_t>(limit)) {
+        take = static_cast<std::size_t>(limit);
+        out.has_more = true;
+        // Курсор — последняя строка ИЗ ОТДАННЫХ (take-1), не подглядочная
+        // (result.rows[limit]) — иначе следующая страница потеряла бы ровно
+        // одну операцию (ту, что сейчас использована только как маркер
+        // "есть ещё", но не показана пользователю).
+        const auto& last = result.rows[take - 1].fields;
+        out.next_cursor_date = last.at(1); // "date"
+        out.next_cursor_uuid = last.at(0); // "operation_uuid"
+    }
+    for (std::size_t i = 0; i < take; ++i) {
+        out.rows.push_back(row_to_json(result.rows[i].fields, kColumns));
+        if (result.rows[i].fields.at(kAmountEqIdx).empty()) out.incomplete = true;
+    }
+    return out;
+}
+
+WalletTurnoverResult wallet_turnover_for_period(db::Database& db, const std::string& ledger_id,
+                                                 const std::string& from, const std::string& to,
+                                                 const std::string& eq_currency_uuid) {
+    auto result = db.exec(
+        "SELECT account_uuid, account_name, comment, is_archived, currency_uuid, symbol, "
+        "\"precision\", icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq, "
+        "bool_or(incomplete) OVER () AS incomplete "
+        "FROM f_wallet_turnover_for_period($1, $2, $3, $4)",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name",   "comment",        "is_archived",     "currency_uuid",
+        "symbol",       "precision",      "icon_sha256",    "turnover_in",     "turnover_out",
+        "turnover_in_eq", "turnover_out_eq",
+    };
+    WalletTurnoverResult out;
+    for (const auto& row : result.rows) {
+        json out_row = row_to_json(row.fields, kColumns);
+        // is_archived — единственная НЕ денежная/текстовая колонка здесь:
+        // row_to_json кладёт все поля как есть строками (тот же приём, что и
+        // у "precision" в остальных отчётах — см. BalanceReportRow), но
+        // признак архивности клиенту удобнее получить настоящим JSON
+        // boolean, а не строкой "t"/"f".
+        out_row["is_archived"] = row.fields.at(3) == "t";
+        out.rows.push_back(out_row);
+        if (row.fields.at(kColumns.size()) == "t") out.incomplete = true;
+    }
+    return out;
+}
+
+BalancesAtDatesResult balances_at_dates(db::Database& db, const std::string& ledger_id,
+                                         const std::vector<std::string>& dates,
+                                         const std::string& eq_currency_uuid) {
+    // Postgres array-литерал текстом — каждый элемент в кавычках: сама дата
+    // не содержит зарезервированных символов массива ({},"\), но кавычки не
+    // вредят и снимают вопрос про экранирование раз и навсегда. libpq шлёт
+    // параметр без явного OID (см. db.hpp у exec()), Postgres кастует его по
+    // объявленному типу параметра функции (timestamp[]) сам.
+    std::string array_literal = "{";
+    for (std::size_t i = 0; i < dates.size(); ++i) {
+        if (i) array_literal += ",";
+        array_literal += "\"" + dates[i] + "\"";
+    }
+    array_literal += "}";
+
+    auto result = db.exec(
+        "SELECT date_index, account_uuid, account_name, currency_uuid, symbol, \"precision\", "
+        "balance, balance_eq, "
+        "COALESCE(sum(balance_eq) OVER (PARTITION BY date_index), 0)::text AS total_eq, "
+        "bool_or(balance_eq IS NULL) OVER (PARTITION BY date_index) AS incomplete "
+        "FROM f_balance_to_dates($1, $2, $3)",
+        {ledger_id, array_literal, eq_currency_uuid});
+
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name", "currency_uuid", "symbol", "precision",
+        "balance",      "balance_eq",
+    };
+
+    BalancesAtDatesResult out;
+    // Ровно один блок на каждую dates[i], СРАЗУ, в исходном порядке — date
+    // эхом повторяет строку запроса (не то, что вернул/нормализовал Postgres,
+    // см. .hpp), а date_index (1-based, см. .sql — WITH ORDINALITY) даёт
+    // индекс блока напрямую, без сопоставления по тексту даты.
+    for (const auto& d : dates) {
+        out.dates.push_back({{"date", d}, {"accounts", json::array()}, {"total_eq", "0"}, {"incomplete", false}});
+    }
+    for (const auto& row : result.rows) {
+        std::size_t idx = static_cast<std::size_t>(std::stoul(row.fields.at(0))) - 1;
+        if (idx >= out.dates.size()) continue; // защитно — не должно случиться, date_index всегда в пределах dates.size()
+        json& block = out.dates.at(idx);
+        std::vector<std::string> account_fields(row.fields.begin() + 1, row.fields.end() - 2);
+        block["accounts"].push_back(row_to_json(account_fields, kColumns));
+        block["total_eq"] = row.fields.at(8);
+        block["incomplete"] = row.fields.at(9) == "t";
+    }
+    return out;
+}
+
+BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_id,
+                                    const std::string& from, const std::string& to,
+                                    const std::string& step, const std::string& eq_currency_uuid,
+                                    bool with_accounts) {
+    BalanceSeriesResult out;
+    if (!with_accounts) {
+        // Та же сумма и тот же incomplete, что и в ветке с accounts ниже,
+        // только агрегированные прямо в базе — по одной строке на бакет
+        // вместо строки на каждый счёт каждого бакета. Пустой бакет (одна
+        // строка с account_uuid IS NULL) даёт sum = NULL -> COALESCE "0" и
+        // bool_or = false, как и там.
+        auto totals = db.exec(
+            "SELECT bucket_start, bucket_end, COALESCE(sum(balance_eq), 0)::text, "
+            "bool_or(account_uuid IS NOT NULL AND balance_eq IS NULL) "
+            "FROM f_balance_series($1, $2, $3, $4, $5) "
+            "GROUP BY date_index, bucket_start, bucket_end ORDER BY date_index",
+            {ledger_id, from, to, step, eq_currency_uuid});
+        for (const auto& row : totals.rows) {
+            out.buckets.push_back({
+                {"bucket_start", row.fields.at(0)},
+                {"bucket_end", row.fields.at(1)},
+                {"total_eq", row.fields.at(2)},
+                {"incomplete", row.fields.at(3) == "t"},
+            });
+        }
+        return out;
+    }
+
+    // incomplete — bool_or ТОЛЬКО по строкам с реальным account_uuid: пустой
+    // бакет (account_uuid IS NULL, см. f_balance_series::LEFT JOIN buckets ->
+    // acct_bal) сам по себе имеет balance_eq IS NULL, но это НЕ "курс не
+    // нашёлся" — счетов там попросту нет, и считать такой бакет "неполным"
+    // было бы неверно (тот же принцип, что и zero-fill incomplete у
+    // f_income_expense_by_month, см. её README).
+    auto result = db.exec(
+        "SELECT date_index, bucket_start, bucket_end, account_uuid, account_name, currency_uuid, "
+        "symbol, \"precision\", balance, balance_eq, "
+        "COALESCE(sum(balance_eq) OVER (PARTITION BY date_index), 0)::text AS total_eq, "
+        "bool_or(account_uuid IS NOT NULL AND balance_eq IS NULL) OVER (PARTITION BY date_index) AS incomplete "
+        "FROM f_balance_series($1, $2, $3, $4, $5)",
+        {ledger_id, from, to, step, eq_currency_uuid});
+
+    static const std::vector<std::string> kColumns = {
+        "account_uuid", "account_name", "currency_uuid", "symbol", "precision",
+        "balance",      "balance_eq",
+    };
+
+    // f_balance_series отдаёт РОВНО одну строку на КАЖДЫЙ бакет (даже
+    // пустой, см. её LEFT JOIN) плюс по одной строке на каждый счёт внутри
+    // непустого — строго по возрастанию date_index (ORDER BY b.idx в самой
+    // функции), поэтому новый блок заводится всякий раз, когда date_index
+    // меняется, без отдельной map "индекс -> позиция блока".
+    int last_idx = -1;
+    for (const auto& row : result.rows) {
+        int idx = std::stoi(row.fields.at(0));
+        if (idx != last_idx) {
+            out.buckets.push_back({
+                {"bucket_start", row.fields.at(1)},
+                {"bucket_end", row.fields.at(2)},
+                {"accounts", json::array()},
+                {"total_eq", row.fields.at(10)},
+                {"incomplete", row.fields.at(11) == "t"},
+            });
+            last_idx = idx;
+        }
+        if (row.fields.at(3).empty()) continue; // пустой бакет — account_uuid пуст (SQL NULL), блок уже заведён выше
+        std::vector<std::string> account_fields(row.fields.begin() + 3, row.fields.begin() + 10);
+        out.buckets.back()["accounts"].push_back(row_to_json(account_fields, kColumns));
+    }
+    return out;
+}
+
+UserStatsResult list_user_stats(db::Database& db) {
+    // Три коррелированных подзапроса вместо одного JOIN account_operating +
+    // operation — намеренно: совместный JOIN дал бы (число кошельков ×
+    // число операций) строк на леджер и раздул бы результат, у count(DISTINCT
+    // ...) с ним пришлось бы бороться отдельно. Подзапросы читаются как
+    // отдельные, точные вопросы ("сколько кошельков", "сколько операций",
+    // "когда первая/последняя") и не создают этот перемножающий JOIN —
+    // ценой N обращений на леджер вместо одного, что для админ-таблицы
+    // (штучные вызовы, не горячий путь) вполне приемлемо.
+    //
+    // a.kind = 1 — явный признак "это кошелёк, не категория" (см.
+    // wallet-api/schema/table/account.sql), дешевле и надёжнее, чем JOIN
+    // account_operating ради того же факта.
+    auto res = db.exec(
+        "SELECT lm.user_id, lm.ledger_id, "
+        "  (SELECT count(*) FROM account a "
+        "     WHERE a.ledger_id = lm.ledger_id AND a.kind = 1 AND a.deleted_at IS NULL) AS wallet_count, "
+        "  (SELECT count(*) FROM operation o "
+        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS operation_count, "
+        "  (SELECT min(o.date) FROM operation o "
+        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS first_operation_date, "
+        "  (SELECT max(o.date) FROM operation o "
+        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS last_operation_date, "
+        "  (SELECT count(*) FROM ledger_member m2 WHERE m2.ledger_id = lm.ledger_id) AS member_count "
+        "FROM ledger_member lm "
+        "WHERE lm.role = 'owner' "
+        "ORDER BY lm.user_id");
+
+    static const std::vector<std::string> kColumns = {
+        "user_id", "ledger_id", "wallet_count", "operation_count",
+        "first_operation_date", "last_operation_date", "member_count",
+    };
+
+    UserStatsResult out;
+    for (const auto& row : res.rows) out.users.push_back(row_to_json(row.fields, kColumns));
+    return out;
+}
+
+IconsResult list_icons(db::Database& db, const std::optional<std::string>& ledger_id) {
+    static const std::vector<std::string> kColumns = {"uuid", "name", "icon_type", "sha256"};
+
+    IconsResult result;
+    auto common_res = db.exec(
+        "SELECT uuid, name, icon_type, encode(content_sha256, 'hex') FROM icon "
+        "WHERE ledger_id IS NULL AND deleted_at IS NULL ORDER BY name");
+    for (const auto& row : common_res.rows) result.common.push_back(row_to_json(row.fields, kColumns));
+
+    if (ledger_id) {
+        auto user_res = db.exec(
+            "SELECT uuid, name, icon_type, encode(content_sha256, 'hex') FROM icon "
+            "WHERE ledger_id = $1 AND deleted_at IS NULL ORDER BY name",
+            {*ledger_id});
+        for (const auto& row : user_res.rows) result.user.push_back(row_to_json(row.fields, kColumns));
+    }
+
+    return result;
+}
+
+} // namespace reports_repo

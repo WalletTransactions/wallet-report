@@ -1,0 +1,1109 @@
+openapi: 3.1.0
+info:
+  title: wallet-report
+  version: "1.0.0"
+  description: |
+    Сервис отчётов (CQRS-lite query-сторона, выделена из `wallet-api`
+    2026-09-08 — см. `wallet-report/README.md`, "История"). Читает
+    ТУ ЖЕ Postgres-базу, что и wallet-api, ЕДИНСТВЕННОЙ read-only ролью
+    (`wallet_reader`) — не выпускает и не ротирует токен, только проверяет
+    JWT по JWKS `google-auth`.
+
+    В проде запросы идут через `wallet-gateway` (порт 8090, префикс
+    `/api/reports/*`) — гейтвей уже отсёк запросы без синтаксически
+    валидного токена (грубая проверка подписи+`exp`), но саму авторизацию
+    (резолв леджера пользователя) всё равно делает этот сервис. Ниже —
+    прямой адрес самого сервиса.
+servers:
+  - url: http://localhost:8084
+    description: Прямой адрес сервиса (по умолчанию, см. .env.example — PORT)
+
+tags:
+  - name: reports
+    description: Отчёты поверх SQL-функций и роли wallet_reader (не провизионируют, не требуют device_id)
+  - name: docs
+    description: "Отдача этой самой спеки и Swagger UI поверх неё (src/docs.cpp) — не часть API, чисто мета"
+
+paths:
+  /docs:
+    get:
+      operationId: docs
+      summary: "Swagger UI поверх /openapi.yaml (эта самая страница)"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: HTML-страница Swagger UI (вендоренный статический бандл, см. third_party/swagger-ui/README.md)
+          content:
+            text/html: {schema: {type: string}}
+
+  /openapi.yaml:
+    get:
+      operationId: openApiYaml
+      summary: "Эта самая спецификация — файл рядом с исполняемым файлом, отдаётся как есть"
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Текст этого файла
+          content:
+            application/yaml: {schema: {type: string}}
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness для docker/podman compose healthcheck (см. wallet-infra/compose.yaml)"
+      description: |
+        Проверяет только то, что сам процесс жив и обслуживает HTTP — не
+        reports_db (см. src/docs.cpp, почему нарочно не проверяет).
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Сервис жив
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+
+  /version:
+    get:
+      operationId: version
+      summary: "Версия ЭТОГО билда — проставляется на сборке (см. CMakeLists.txt, VERSION)"
+      description: |
+        `version` — semver из файла `VERSION` рядом с `CMakeLists.txt`;
+        `git_commit` — короткий хэш коммита на момент сборки (`unknown`, если
+        собрано без git — например, вручную без `--build-arg GIT_COMMIT`, см.
+        Containerfile). Та же тройка полей — в `build_info` внутри
+        `GET /metrics` (см. `infra/monitoring`), здесь — для человека и curl
+        без PromQL.
+      tags: [docs]
+      security: []
+      responses:
+        "200":
+          description: Версия и git-хэш текущего билда
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: {type: string, example: wallet-report}
+                  version: {type: string, example: "0.1.0"}
+                  git_commit: {type: string, example: "a1b2c3d4"}
+
+  /api/reports/balance:
+    get:
+      operationId: reportBalance
+      summary: Баланс каждого кошелька леджера на дату
+      description: |
+        Обёртка над `f_balance_to_date` (wallet-api/schema/function/). Баланс —
+        обороты СТРОГО ДО `date` (сама дата не включается). Пользователь без
+        ни одного леджера (никогда не синкал) получает пустой список, не
+        ошибку — отчёты ничего не провизионируют (см. описание тега reports).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema: {type: string}
+          description: "Timestamp (Postgres сам разбирает и \"2026-09-05\", и полный ISO) — граница НЕ включается"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: date отсутствует, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Баланс по каждому кошельку, у которого было хоть какое-то движение
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/BalanceReport"}}
+
+  /api/reports/income:
+    get:
+      operationId: reportIncome
+      summary: Доход за период с разбивкой по счёту-источнику
+      description: |
+        Обёртка над `f_income_for_period`. Границы периода ВКЛЮЧИТЕЛЬНЫ с
+        обеих сторон (в отличие от /balance, где дата исключается) — здесь
+        "обороты за отрезок", там "состояние на момент". Доход отличает
+        НАПРАВЛЕНИЕ проводки (из категории в кошелёк), не знак суммы — amount
+        в operation всегда положительный.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Доход с разбивкой по счёту-источнику (категории)
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/PeriodReport"}}
+
+  /api/reports/expense:
+    get:
+      operationId: reportExpense
+      summary: Расход за период с разбивкой по счёту-получателю
+      description: |
+        Обёртка над `f_expanse_for_period` — зеркально /income: расход
+        отличает направление (из кошелька в категорию). Границы периода
+        включительны с обеих сторон.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Расход с разбивкой по счёту-получателю (категории)
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/PeriodReport"}}
+
+  /api/reports/expense-structure:
+    get:
+      operationId: reportExpenseStructure
+      summary: Доля каждой категории в расходе за период, с необязательным сравнением периодов
+      description: |
+        Обёртка над `f_expanse_by_category_for_period` — в отличие от
+        `/expense`, группирует ТОЛЬКО по категории (не по (категория,
+        валюта)): категория, оплаченная в двух валютах кошелька, здесь одна
+        строка, а не две (валюты уже смешаны через `amount_eq`), поэтому у
+        строки нет ни `currency_uuid`, ни "своей" суммы — только `amount_eq`.
+        `icon_sha256` — content_sha256 иконки категории (есть всегда,
+        account.icon_uuid NOT NULL); картинку клиент качает сам через
+        `GET /sync/blobs/{sha256}` (wallet-api).
+
+        `cmp_from`/`cmp_to` — необязательный период сравнения ("предыдущий
+        период"/"год назад" и т.п. — вычисляет вызывающий, сервис только
+        принимает готовые границы); указываются оба или ни одного. Если
+        заданы — у каждой строки появляются `pct_before` и `pp_delta`
+        (сдвиг доли в процентных пунктах), а в ответе — `total_eq_before` и
+        `compared: true`. Категория, которая была в cmp-периоде, но
+        отсутствует в основном, всё равно попадает в список (`amount_eq:
+        "0"`, `pp_delta` отрицательный) — иначе "исчезнувшая" категория
+        была бы не видна в сравнении вообще.
+
+        `pct`/`pct_before`/`pp_delta` — JSON null, если процент нельзя
+        посчитать (курса не нашлось у этой строки, либо соответствующий
+        период вообще без расходов).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+        - name: cmp_from
+          in: query
+          required: false
+          schema: {type: string}
+          description: "Timestamp, начало периода сравнения — только вместе с cmp_to"
+        - name: cmp_to
+          in: query
+          required: false
+          schema: {type: string}
+          description: "Timestamp, конец периода сравнения (включительно) — только вместе с cmp_from"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "from/to отсутствуют, eq_currency отсутствует/неизвестный ISO-код, либо задан только один из cmp_from/cmp_to"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Доля каждой категории в расходе за период
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/ExpenseStructureReport"}}
+
+  /api/reports/income-expense-by-month:
+    get:
+      operationId: reportIncomeExpenseByMonth
+      summary: Доход и расход по месяцам за период — экран "Обзор"
+      description: |
+        Обёртка над `f_income_expense_by_month`. `months` — по одному
+        элементу на КАЖДЫЙ календарный месяц между `from` и `to`, включая
+        месяцы без единой операции (`income_eq`/`expense_eq` — `"0.00"`,
+        не пропуск строки) — график должен показывать ровные столбцы на
+        каждый месяц периода, а не сжиматься до месяцев с активностью.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Доход и расход по месяцам
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/MonthlyReport"}}
+
+  /api/reports/expense-by-weekday:
+    get:
+      operationId: reportExpenseByWeekday
+      summary: Расход по дню недели за период — экран "Обзор"
+      description: |
+        Обёртка над `f_expense_by_weekday_for_period`. `days` — РОВНО 7
+        элементов, `isodow` 1..7 (понедельник..воскресенье), включая дни
+        без расходов (`expense_eq: "0.00"`, не пропуск строки).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Расход по дню недели
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/WeekdayReport"}}
+
+  /api/reports/expense-biggest-moves:
+    get:
+      operationId: reportExpenseBiggestMoves
+      summary: Категории с наибольшим изменением расхода между двумя периодами — экран "Обзор"
+      description: |
+        Топ категорий по МОДУЛЮ разницы между расходом за `from`/`to` и
+        расходом за `cmp_from`/`cmp_to` (в отличие от `/expense-structure`,
+        здесь `cmp_from`/`cmp_to` ОБЯЗАТЕЛЬНЫ — без периода сравнения самой
+        панели нечего показывать). Категория, у которой сумма неизвестна
+        (курса не нашлось) хотя бы в одном из двух периодов, в список не
+        попадает — дельту от неизвестного числа посчитать нельзя.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+        - name: cmp_from
+          in: query
+          required: true
+          schema: {type: string}
+          description: "Timestamp, начало периода сравнения"
+        - name: cmp_to
+          in: query
+          required: true
+          schema: {type: string}
+          description: "Timestamp, конец периода сравнения (включительно)"
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 20, default: 6}
+          description: "Сколько категорий вернуть (отсортированы по |Δ| убыв.)"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "from/to/cmp_from/cmp_to отсутствуют, eq_currency отсутствует/неизвестный ISO-код, либо limit вне диапазона 1..20"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Категории с наибольшим изменением расхода
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/BiggestMovesReport"}}
+
+  /api/reports/operations:
+    get:
+      operationId: reportOperations
+      summary: Страница операций периода — экран "Список операций"
+      description: |
+        Обёртка над `f_operations_for_period`. Без поиска/фильтра по типу/
+        категории/кошельку на сервере — клиент делает это сам над уже
+        загруженными страницами (тот же приём, что design-прототип экрана
+        держит ленту в памяти).
+
+        Курсорная пагинация (по прямому запросу, 2026-09-12 — "если выбираем
+        20 лет, то нет необходимости доставать всё"): страница — не более
+        `limit` операций, отсортированных по дате убыв.; `has_more: true`
+        значит, что после этой страницы есть ещё хотя бы одна операция —
+        тогда в ответе есть `next_cursor_date`/`next_cursor_uuid`, их нужно
+        эхом передать как `cursor_date`/`cursor_uuid` в следующий вызов
+        (за первой страницей — без них вовсе). Курсор — не номер страницы и
+        не OFFSET: он устойчив к операциям, добавленным/удалённым между
+        вызовами (в отличие от OFFSET, который в этом случае может пропустить
+        строку или показать одну дважды), и не деградирует на глубоких
+        страницах.
+
+        `incomplete` — про ЭТУ страницу (хотя бы у одной её операции не
+        нашёлся курс в `eq_currency`), не про весь период целиком.
+
+        `kind` каждой строки — `"expense"`/`"income"`/`"transfer"`.
+        Разновалютный перевод между кошельками хранится ДВУМЯ проводками
+        через системную категорию Transfer и попадает сюда как обычные
+        `expense`+`income` по этой категории (см. память проекта: переводы
+        считаются расходом в отчётах) — `kind: "transfer"` только у прямой
+        проводки кошелёк → кошелёк.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 1000}
+          description: "Сколько операций вернуть максимум на этой странице"
+        - name: cursor_date
+          in: query
+          required: false
+          schema: {type: string}
+          description: "next_cursor_date предыдущей страницы; отсутствует — запрашивается первая страница. Задаётся ВМЕСТЕ с cursor_uuid, не отдельно"
+        - name: cursor_uuid
+          in: query
+          required: false
+          schema: {type: string, format: uuid}
+          description: "next_cursor_uuid предыдущей страницы; задаётся ВМЕСТЕ с cursor_date, не отдельно"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "from/to отсутствуют, eq_currency отсутствует/неизвестный ISO-код, limit вне диапазона 1..1000, либо задан только один из cursor_date/cursor_uuid"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Страница операций периода, отсортирована по дате убыв.
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/OperationsReport"}}
+
+  /api/reports/wallet-turnover:
+    get:
+      operationId: reportWalletTurnover
+      summary: Оборот каждого кошелька леджера за период — экран "Кошельки и остатки"
+      description: |
+        Обёртка над `f_wallet_turnover_for_period`. `turnover_in`/`turnover_out`
+        считают ЛЮБОЕ движение по кошельку — включая переводы кошелёк →
+        кошелёк, не только обмен со статьёй (категорией), как у `/income` и
+        `/expense`. Своя сумма (в валюте счёта) и сумма в эквиваленте
+        отдаются РАЗОМ: `turnover_in`/`turnover_out` — своя валюта (для
+        подписи под каждым кошельком), `turnover_in_eq`/`turnover_out_eq` —
+        эквивалент (для сортировки столбцов на экране: суммы разных валют
+        кошельков иначе несравнимы).
+
+        Возвращаются ВСЕ кошельки леджера, а не только те, что двигались в
+        периоде (`turnover_in`/`turnover_out`: `"0.00"`, не пропуск строки) —
+        экран "Мои кошельки" обязан показать и кошелёк без единой операции за
+        период.
+
+        Остатки на начало/конец периода эта ручка не отдаёт — клиент берёт их
+        из `GET /api/reports/balance-at-dates` (одним батч-запросом на обе
+        даты периода плюс точки спарклайна).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Оборот каждого кошелька леджера, ORDER BY account_name
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/WalletTurnoverReport"}}
+
+  /api/reports/balance-at-dates:
+    get:
+      operationId: reportBalanceAtDates
+      summary: Баланс каждого кошелька леджера сразу на несколько дат — батч-версия /balance
+      description: |
+        Обёртка над `f_balance_to_dates`. Та же формула, что у `/balance`
+        (обороты СТРОГО ДО даты — граница не включается), но сразу на список
+        дат одним запросом: "Кошельки и остатки" делали до 14 отдельных
+        вызовов `/balance` на один показ экрана (начало периода, конец
+        периода, 12 точек спарклайна), "Обзор" — ещё 12 на линию остатка
+        "Расхода по месяцам". По прямому запросу — "сервер научится отдавать
+        балком за период для нескольких кошельков (в т.ч. все доступные
+        данному пользователю)": каждый блок ответа, как и у `/balance`,
+        покрывает ВСЕ кошельки леджера на свою дату.
+
+        Ответ содержит РОВНО один блок на каждую дату из `dates`, В ТОМ ЖЕ
+        ПОРЯДКЕ — включая даты без единого кошелька с движением (`accounts:
+        []`, `total_eq: "0"`) — вызывающему не нужно ничего домысливать по
+        пропущенным датам. `date` каждого блока — эхо строки запроса как
+        есть (не то, что вернул/нормализовал Postgres).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - name: dates
+          in: query
+          required: true
+          schema: {type: string}
+          description: "Даты через запятую (например \"2026-01-30,2026-02-28\"), до 400 штук; каждая — та же граница НЕ включается, что и у date в /balance"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "dates отсутствует/содержит пустой элемент/больше 400 штук, либо eq_currency отсутствует/неизвестный ISO-код"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: По одному блоку балансов на каждую запрошенную дату, в том же порядке
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/BalanceAtDatesReport"}}
+
+  /api/reports/balance-series:
+    get:
+      operationId: reportBalanceSeries
+      summary: Баланс каждого кошелька леджера по бакетам периода (день/неделя/месяц/год) — то же, что /balance-at-dates, но границы бакетов строит сам сервер
+      description: |
+        По прямому запросу (2026-09-11 — "новое API, которое просит с/по и
+        шагом, а не вызов с миллионом параметров в GET"): раньше линия
+        остатка на "Обзоре"/"Динамике" строилась через `/balance-at-dates` —
+        клиент сам считал ГРАНИЦЫ бакетов (день/неделя/месяц) и слал их
+        списком в query-параметре `dates`, что при широком периоде с
+        группировкой по дням/неделям разрасталось до сотен дат и упиралось в
+        лимит длины URI на гейтвее (8192 байт, cpp-httplib) — браузер видел
+        не аккуратную HTTP-ошибку, а голый network-fail.
+
+        Здесь сервер сам генерирует границы бакетов из `from`/`to`/`step` —
+        запрос всегда фиксированного размера, независимо от длины периода.
+        Обёртка над `f_balance_series`; та же формула баланса, что и у
+        `/balance`/`/balance-at-dates` (обороты СТРОГО ДО даты — для бакета
+        это день ПОСЛЕ его конца).
+
+        Бакеты выровнены по календарю: `day` — сам `from`; `week` —
+        понедельник ISO-недели, содержащей `from`; `month` — 1-е число
+        месяца `from`; `year` — 1 января года `from`. Каждый следующий бакет
+        — предыдущий плюс шаг, последний обрезан по `to` (может быть
+        неполным, как и первый, если `from` не совпал с границей шага).
+
+        Ответ содержит РОВНО один блок на каждый бакет, В ХРОНОЛОГИЧЕСКОМ
+        ПОРЯДКЕ — включая бакеты без единого кошелька с движением
+        (`accounts: []`, `total_eq: "0"`), например самые ранние бакеты
+        леджера, до первой операции. Если у пользователя ещё нет леджера —
+        `buckets: []` целиком (сервер не строит бакеты без данных, звать
+        `f_balance_series` ради заведомо пустого леджера незачем).
+
+        По умолчанию блок содержит только итог (`total_eq`/`incomplete`) —
+        без `accounts`: два года по дням с детализацией по счетам — ~6.5 МБ
+        JSON, а веб-клиенту нужен только итог. Детализация — `accounts=true`.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - name: step
+          in: query
+          required: true
+          schema: {type: string, enum: [day, week, month, year]}
+          description: "Длина бакета — календарно выровненная (день/понедельник недели/1-е число месяца/1 января года)"
+        - name: accounts
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: "true — добавить в каждый блок массив accounts (баланс каждого счёта); по умолчанию только итог"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "from/to/step отсутствуют, step не из {day,week,month,year}, либо eq_currency отсутствует/неизвестный ISO-код"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: По одному блоку балансов на каждый бакет периода, в хронологическом порядке
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/BalanceSeriesReport"}}
+
+  /api/reports/currencies:
+    get:
+      operationId: reportCurrencies
+      summary: Справочник валют — веб-клиент строит из него выбор "Валюта эквивалента"
+      description: |
+        Валюты, видимые этому леджеру: общий справочник (`ledger_id IS NULL`
+        в схеме) плюс, если у пользователя уже есть леджер, его собственные
+        (редкие: локальная/крипта). При совпадении `iso_code` между общей
+        валютой и своей этого леджера в списке только ОДНА строка — своя (тот
+        же приоритет, что при резолве `eq_currency` на остальных отчётах).
+
+        Список не зависит от периода — без `from`/`to`; без `eq_currency` —
+        сам этот отчёт СУЩЕСТВУЕТ для того, чтобы им заполнить eq_currency,
+        а не наоборот.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Валюты, видимые этому леджеру, отсортированы по iso_code
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/CurrenciesReport"}}
+
+  /api/reports/accounts:
+    get:
+      operationId: reportAccounts
+      summary: Справочник кошельков и категорий леджера (для Telegram-бота)
+      description: |
+        Все живые (не удалённые) кошельки и категории леджера — без
+        привязки к периоду и обороту, в отличие от `expense-structure`.
+        Кошелёк — счёт с живой строкой `account_operating` (у него есть
+        валюта), иначе категория. Системные категории (Transfer, Transfer
+        commission) не скрываются — у них `system_kind` 1/2, отфильтровать
+        их — забота клиента. Нет леджера — 200 и `accounts: []`.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema: {type: string, enum: [wallet, category]}
+          description: "Только кошельки или только категории. Без параметра — все."
+        - name: include_archived
+          in: query
+          required: false
+          schema: {type: string, enum: ["true", "false"], default: "false"}
+          description: "Показывать архивные счета (по умолчанию нет)."
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "kind не из {wallet, category} или include_archived не true/false"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Кошельки, затем категории, внутри — по имени
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/AccountsReport"}}
+
+  /api/reports/icons:
+    get:
+      operationId: reportIcons
+      summary: Иконки, доступные этому леджеру — вкладка "Иконки" веб-клиента
+      description: |
+        `common` — общий/эталонный набор (`icon.ledger_id IS NULL`), виден
+        всем; `user` — собственные иконки леджера пользователя (добавленные
+        из галереи). Нет леджера — не ошибка, `user: []`. Картинку клиент
+        качает сам по `sha256` через `GET /sync/blobs/:sha256`.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Иконки, отсортированы по name
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/IconsReport"}}
+
+  /api/reports/admin/users:
+    get:
+      operationId: reportAdminUsers
+      summary: "Админ-таблица: агрегаты по ВСЕМ пользователям (только Role::Admin)"
+      description: |
+        Не отчёт по своему леджеру, а список по КАЖДОМУ владельцу леджера
+        (роль `owner` в `ledger_member`) — число кошельков, число операций,
+        даты первой/последней операции, число участников леджера (см.
+        `reports_repo::list_user_stats`). Используется таблицей
+        "Пользователи" в SPA (`app.js::renderAdmin()`), сшивается там с
+        `GET /admin/users` (google-auth) по `user_id`.
+
+        Путь под `/api/reports/*`, а не `/admin/*` — остаётся на
+        wallet-report без правки маршрутизации wallet-gateway (см. его
+        README, "Порядок важен" — `/admin/*` целиком уходит на google-auth).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "403":
+          description: Роль вызывающего не admin
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: По одной строке на каждого владельца леджера
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/UserStatsReport"}}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Access-токен google-auth, проверяется по JWKS."
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+
+  parameters:
+    eqCurrency:
+      name: eq_currency
+      in: query
+      required: true
+      schema: {type: string}
+      description: "ISO-код валюты эквивалента (например USD) — обязателен на всех отчётах"
+    periodFrom:
+      name: from
+      in: query
+      required: true
+      schema: {type: string}
+      description: "Timestamp, граница ВКЛЮЧИТЕЛЬНА (в отличие от /balance)"
+    periodTo:
+      name: to
+      in: query
+      required: true
+      schema: {type: string}
+      description: "Timestamp, граница ВКЛЮЧИТЕЛЬНА"
+    asUserId:
+      name: as_user_id
+      in: query
+      required: false
+      schema: {type: string, format: uuid}
+      description: |
+        "Посмотреть как клиент" — только Role::Admin. Если задан, отчёт
+        резолвит леджер УКАЗАННОГО user_id вместо леджера вызывающего;
+        у любой другой роли — 403 (не молчаливое игнорирование параметра).
+        Каждый вызов с этим параметром пишется в лог отдельной аудит-строкой
+        (event: admin_view_as).
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: {type: string}
+      required: [error]
+
+    # numeric-колонки — СТРОКИ: прямой SELECT через libpq в текстовом
+    # формате результата (см. reports_repo.hpp) — тот же принцип "numeric
+    # как строка", что и в протоколе синка wallet-api, просто здесь он
+    # достаётся бесплатно.
+
+    BalanceReportRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        currency_uuid: {type: string, format: uuid}
+        symbol: {type: string}
+        precision: {type: integer}
+        balance: {type: string, description: "В своей валюте счёта"}
+        balance_eq: {type: string, description: "В валюте eq_currency; может быть JSON null, если курса не нашлось"}
+      required: [account_uuid, account_name, currency_uuid, symbol, precision, balance, balance_eq]
+
+    BalanceReport:
+      type: object
+      properties:
+        accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}}
+        total_eq:
+          type: string
+          description: "sum(balance_eq) по всем строкам (NULL пропускаются — см. incomplete)"
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одного счёта не нашлось курса в eq_currency, total_eq занижен"
+        eq_currency_uuid:
+          type: string
+          format: uuid
+          description: |
+            uuid валюты, в которую резолвился запрошенный eq_currency (ISO-код).
+            Строка отчёта, чей currency_uuid совпадает с этим значением, — это
+            "кошелёк уже в валюте эквивалента" (показывать число БЕЗ пометки
+            "≈", см. android-wallet/docs/ARCHITECTURE.md, "Три состояния эквивалента" — та же
+            разметка, что и в Android-приложении).
+      required: [accounts, total_eq, incomplete, eq_currency_uuid]
+
+    PeriodReportRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        currency_uuid: {type: string, format: uuid}
+        amount: {type: string, description: "В своей валюте счёта"}
+        amount_eq: {type: string, description: "В валюте eq_currency; может быть JSON null, если курса не нашлось"}
+      required: [account_uuid, account_name, currency_uuid, amount, amount_eq]
+
+    PeriodReport:
+      type: object
+      properties:
+        accounts: {type: array, items: {$ref: "#/components/schemas/PeriodReportRow"}}
+        total_eq:
+          type: string
+          description: "sum(amount_eq) по всем строкам (NULL пропускаются — см. incomplete)"
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одной строки не нашлось курса в eq_currency, total_eq занижен"
+        eq_currency_uuid:
+          type: string
+          format: uuid
+          description: "См. BalanceReport.eq_currency_uuid — тот же смысл."
+      required: [accounts, total_eq, incomplete, eq_currency_uuid]
+
+    ExpenseStructureRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        amount_eq:
+          type: string
+          description: "Сумма категории за основной период в валюте eq_currency (валюты уже смешаны — нет отдельной \"своей\" суммы, в отличие от PeriodReportRow). \"0\" у категории, которая встречалась только в cmp-периоде."
+        icon_sha256:
+          type: string
+          description: "content_sha256 иконки категории (account.icon_uuid — NOT NULL, значит есть всегда), hex, 64 символа. Картинку клиент качает сам: GET /sync/blobs/{sha256} (wallet-api) — сессионной куки достаточно, device_id не нужен."
+        pct:
+          type: [string, "null"]
+          description: "Доля категории в total_eq основного периода, число без \"%\" (например \"24.3\"). null — amount_eq этой строки неизвестен (курса не нашлось) либо total_eq основного периода равен 0."
+        pct_before:
+          type: [string, "null"]
+          description: "Присутствует, только если запрос указывал cmp_from/cmp_to. Та же доля, но в cmp-периоде. null — как у pct, но относительно cmp-периода; отсутствие категории в cmp-периоде — это 0, не null."
+        pp_delta:
+          type: [string, "null"]
+          description: "Присутствует, только если запрос указывал cmp_from/cmp_to. pct минус pct_before, в процентных пунктах. null, если хотя бы один из них null."
+      required: [account_uuid, account_name, amount_eq, icon_sha256, pct]
+
+    ExpenseStructureReport:
+      type: object
+      properties:
+        categories: {type: array, items: {$ref: "#/components/schemas/ExpenseStructureRow"}}
+        total_eq:
+          type: string
+          description: "sum(amount_eq) по всем категориям основного периода (NULL пропускаются — см. incomplete)"
+        total_eq_before:
+          type: string
+          description: "Присутствует, только если compared == true — тот же агрегат для cmp-периода."
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одной строки ЛЮБОГО из периодов (основного или cmp) не нашлось курса в eq_currency"
+        compared:
+          type: boolean
+          description: "true — запрос указывал cmp_from/cmp_to, и pct_before/pp_delta/total_eq_before заполнены"
+        eq_currency_uuid:
+          type: string
+          format: uuid
+          description: "См. BalanceReport.eq_currency_uuid — тот же смысл."
+      required: [categories, total_eq, incomplete, compared, eq_currency_uuid]
+
+    MonthlyPoint:
+      type: object
+      properties:
+        month_start: {type: string, description: "\"YYYY-MM-DD\", первое число месяца"}
+        income_eq: {type: string}
+        expense_eq: {type: string}
+      required: [month_start, income_eq, expense_eq]
+
+    MonthlyReport:
+      type: object
+      properties:
+        months: {type: array, items: {$ref: "#/components/schemas/MonthlyPoint"}}
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одного месяца не нашлось курса хотя бы у одной операции"
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [months, incomplete, eq_currency_uuid]
+
+    WeekdayPoint:
+      type: object
+      properties:
+        isodow: {type: integer, minimum: 1, maximum: 7, description: "1=понедельник..7=воскресенье"}
+        expense_eq: {type: string}
+      required: [isodow, expense_eq]
+
+    WeekdayReport:
+      type: object
+      properties:
+        days: {type: array, items: {$ref: "#/components/schemas/WeekdayPoint"}}
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одного дня недели не нашлось курса хотя бы у одной операции"
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [days, incomplete, eq_currency_uuid]
+
+    BiggestMoveRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        icon_sha256: {type: string, description: "См. ExpenseStructureRow.icon_sha256 — тот же смысл."}
+        amount_now_eq: {type: string, description: "Сумма категории за основной период (from/to). \"0\" — категории не было в этом периоде вовсе."}
+        amount_before_eq: {type: string, description: "Сумма категории за период сравнения (cmp_from/cmp_to). \"0\" — категории не было и там."}
+      required: [account_uuid, account_name, icon_sha256, amount_now_eq, amount_before_eq]
+
+    BiggestMovesReport:
+      type: object
+      properties:
+        rows:
+          type: array
+          items: {$ref: "#/components/schemas/BiggestMoveRow"}
+          description: "Отсортированы по |amount_now_eq - amount_before_eq| убыв., не больше limit строк. Дельту клиент считает сам из двух сумм — сервер её отдельным полем не отдаёт."
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одной категории ЛЮБОГО из периодов не нашлось курса в eq_currency"
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [rows, incomplete, eq_currency_uuid]
+
+    OperationRow:
+      type: object
+      properties:
+        operation_uuid: {type: string, format: uuid}
+        date: {type: string, description: "Timestamp операции, как хранится (локальное время устройства, без пояса)."}
+        kind: {type: string, enum: [expense, income, transfer]}
+        amount: {type: string, description: "Сумма проводки в СВОЕЙ валюте (currency_uuid), не в эквиваленте."}
+        currency_uuid: {type: string, format: uuid}
+        symbol: {type: string, description: "Символ своей валюты проводки, для вывода amount без похода за currency отдельно."}
+        precision: {type: integer, description: "Число знаков своей валюты — сколько показывать у amount."}
+        amount_eq:
+          type: string
+          description: "Сумма в валюте eq_currency. Пустая строка — курса не нашлось (см. incomplete у OperationsReport)."
+        comment: {type: string}
+        category_uuid:
+          type: string
+          description: "uuid категории. Пустая строка у kind=transfer — там нет одной категории, см. from_uuid/to_uuid."
+        category_name: {type: string, description: "Пустая строка у kind=transfer."}
+        icon_sha256: {type: string, description: "content_sha256 иконки категории, hex. Пустая строка у kind=transfer. См. ExpenseStructureRow.icon_sha256 про сам механизм."}
+        wallet_uuid:
+          type: string
+          description: "uuid кошелька (сторона проводки, что operating) у expense/income. Пустая строка у kind=transfer — участвуют ОБА кошелька, см. from_uuid/to_uuid."
+        wallet_name: {type: string, description: "Пустая строка у kind=transfer."}
+        from_uuid: {type: string, format: uuid, description: "Счёт списания — как в operation.acc_fr_uuid, для ЛЮБОГО kind."}
+        from_name: {type: string}
+        to_uuid: {type: string, format: uuid, description: "Счёт зачисления — как в operation.acc_to_uuid, для ЛЮБОГО kind."}
+        to_name: {type: string}
+      required:
+        [operation_uuid, date, kind, amount, currency_uuid, symbol, precision, amount_eq, comment,
+         category_uuid, category_name, icon_sha256, wallet_uuid, wallet_name,
+         from_uuid, from_name, to_uuid, to_name]
+
+    OperationsReport:
+      type: object
+      properties:
+        operations:
+          type: array
+          items: {$ref: "#/components/schemas/OperationRow"}
+          description: "Одна страница операций периода (не более limit), отсортирована по date убыв. — без фильтров на сервере, см. описание ручки."
+        incomplete:
+          type: boolean
+          description: "true — хотя бы у одной операции ЭТОЙ СТРАНИЦЫ не нашлось курса в eq_currency (её amount_eq пуст), не про весь период целиком."
+        has_more:
+          type: boolean
+          description: "true — после этой страницы есть ещё хотя бы одна операция периода; тогда есть next_cursor_date/next_cursor_uuid."
+        next_cursor_date:
+          type: string
+          description: "Есть, только если has_more == true. Передать как cursor_date в следующий вызов."
+        next_cursor_uuid:
+          type: string
+          format: uuid
+          description: "Есть, только если has_more == true. Передать как cursor_uuid в следующий вызов."
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [operations, incomplete, has_more, eq_currency_uuid]
+
+    WalletTurnoverRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        comment: {type: string, description: "Свободный текст пользователя (\"Зарплатная карта\", \"Наличные\" и т.п.) — в схеме нет отдельного поля \"тип счёта\"."}
+        is_archived: {type: boolean, description: "Признак только для интерфейса — архивный кошелёк участвует в обороте наравне с остальными."}
+        currency_uuid: {type: string, format: uuid}
+        symbol: {type: string}
+        precision: {type: integer}
+        icon_sha256: {type: string, description: "content_sha256 иконки кошелька (account.icon_uuid NOT NULL — есть всегда), hex. См. ExpenseStructureRow.icon_sha256 про сам механизм."}
+        turnover_in: {type: string, description: "Сколько пришло на кошелёк за период, в его СВОЕЙ валюте (currency_uuid) — не в эквиваленте."}
+        turnover_out: {type: string, description: "Сколько ушло с кошелька за период, в его СВОЕЙ валюте."}
+        turnover_in_eq: {type: string, description: "То же самое движение, но в валюте eq_currency — для сортировки: суммы разных валют кошельков не сравнить напрямую. Может быть занижена без явного признака на строке, если курса не нашлось хотя бы для одной операции — см. incomplete у WalletTurnoverReport."}
+        turnover_out_eq: {type: string, description: "Аналогично turnover_in_eq, для расхода с кошелька."}
+      required: [account_uuid, account_name, comment, is_archived, currency_uuid, symbol, precision, icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq]
+
+    WalletTurnoverReport:
+      type: object
+      properties:
+        wallets:
+          type: array
+          items: {$ref: "#/components/schemas/WalletTurnoverRow"}
+          description: "ВСЕ кошельки леджера, ORDER BY account_name — включая те, что не двигались в периоде вовсе."
+        incomplete:
+          type: boolean
+          description: "true — хотя бы для одной строки ЛЮБОГО из направлений (пришло/ушло) не нашлось курса в eq_currency хотя бы у одной операции."
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [wallets, incomplete, eq_currency_uuid]
+
+    BalanceAtDatesBlock:
+      type: object
+      properties:
+        date: {type: string, description: "Строка запроса как есть (эхо одного элемента dates), не то, что вернул/нормализовал Postgres."}
+        accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}}
+        total_eq: {type: string, description: "См. BalanceReport.total_eq — тот же смысл, но для ЭТОЙ даты."}
+        incomplete: {type: boolean, description: "См. BalanceReport.incomplete — тот же смысл, но для ЭТОЙ даты."}
+      required: [date, accounts, total_eq, incomplete]
+
+    BalanceAtDatesReport:
+      type: object
+      properties:
+        dates:
+          type: array
+          items: {$ref: "#/components/schemas/BalanceAtDatesBlock"}
+          description: "Ровно один блок на каждую дату из query-параметра dates, в том же порядке — включая пустые (accounts: [])."
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл, общий на все блоки."}
+      required: [dates, eq_currency_uuid]
+
+    BalanceSeriesBucket:
+      type: object
+      properties:
+        bucket_start: {type: string, format: date, description: "Начало бакета, календарно выровненное (см. описание /balance-series)."}
+        bucket_end: {type: string, format: date, description: "Конец бакета включительно — обрезан по to для последнего/частичного бакета."}
+        accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}, description: "Только при accounts=true."}
+        total_eq: {type: string, description: "См. BalanceReport.total_eq — тот же смысл, но для ЭТОГО бакета."}
+        incomplete: {type: boolean, description: "См. BalanceReport.incomplete — тот же смысл, но для ЭТОГО бакета; пустой бакет (accounts: []) сюда не попадает как incomplete."}
+      required: [bucket_start, bucket_end, total_eq, incomplete]
+
+    BalanceSeriesReport:
+      type: object
+      properties:
+        buckets:
+          type: array
+          items: {$ref: "#/components/schemas/BalanceSeriesBucket"}
+          description: "По одному блоку на каждый календарный бакет [from, to] с шагом step, в хронологическом порядке — включая пустые (accounts: [])."
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл, общий на все блоки."}
+      required: [buckets, eq_currency_uuid]
+
+    CurrencyRow:
+      type: object
+      properties:
+        uuid: {type: string, format: uuid}
+        iso_code: {type: string, description: "Код валюты (например, \"USD\") — именно его отправлять как eq_currency остальным отчётам."}
+        name: {type: string, description: "Название валюты, видимое пользователю."}
+        symbol: {type: string, description: "Символ валюты для вывода сумм (например, \"$\")."}
+        icon_sha256: {type: string, description: "content_sha256 иконки-флага валюты, hex. Картинку веб-клиент качает сам через GET /sync/blobs/:sha256 (wallet-api), см. ExpenseStructureRow.icon_sha256 про сам механизм."}
+      required: [uuid, iso_code, name, symbol, icon_sha256]
+
+    IconsReport:
+      type: object
+      properties:
+        common: {type: array, items: {$ref: "#/components/schemas/Icon"}}
+        user: {type: array, items: {$ref: "#/components/schemas/Icon"}}
+    Icon:
+      type: object
+      properties:
+        uuid: {type: string, format: uuid}
+        name: {type: string}
+        icon_type: {type: string, description: "smallint текстом, как и остальные числа отчётов"}
+        sha256: {type: string, description: "hex content_sha256 — ключ для GET /sync/blobs/:sha256"}
+    CurrenciesReport:
+      type: object
+      properties:
+        currencies:
+          type: array
+          items: {$ref: "#/components/schemas/CurrencyRow"}
+          description: "Валюты, видимые этому леджеру, ORDER BY iso_code."
+      required: [currencies]
+
+    AccountsReport:
+      type: object
+      properties:
+        accounts:
+          type: array
+          items: {$ref: "#/components/schemas/AccountRow"}
+          description: "ORDER BY kind (кошельки первыми), name."
+      required: [accounts]
+    AccountRow:
+      type: object
+      properties:
+        uuid: {type: string, format: uuid}
+        name: {type: string}
+        kind: {type: string, enum: [wallet, category]}
+        system_kind: {type: integer, enum: [0, 1, 2], description: "0 — обычный счёт, 1 — Transfer, 2 — Transfer commission."}
+        is_archived: {type: boolean}
+        icon_sha256: {type: string, description: "hex content_sha256 иконки — ключ для GET /sync/blobs/:sha256."}
+        currency_uuid: {type: string, description: "Валюта кошелька; пустая строка у категории."}
+        iso_code: {type: string, description: "ISO-код валюты кошелька; пустая строка у категории."}
+        symbol: {type: string, description: "Символ валюты кошелька; пустая строка у категории."}
+        precision: {type: string, description: "Число знаков в суммах валюты кошелька (smallint текстом, как остальные числа отчётов); пустая строка у категории."}
+      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision]
+
+    UserStatsRow:
+      type: object
+      properties:
+        user_id: {type: string, format: uuid, description: "Владелец леджера — тот же id, что в google-auth GET /admin/users."}
+        ledger_id: {type: string, format: uuid}
+        wallet_count: {type: string, description: "Число живых кошельков (account.kind=1, не удалённых) в этом леджере — строкой, тем же принципом, что и остальные числовые поля файла."}
+        operation_count: {type: string, description: "Число живых операций в этом леджере."}
+        first_operation_date: {type: string, description: "Дата самой ранней живой операции; пустая строка, если операций ещё нет вовсе."}
+        last_operation_date: {type: string, description: "Дата самой поздней живой операции; пустая строка, если операций ещё нет вовсе."}
+        member_count: {type: string, description: "Число участников леджера (включая самого владельца) — >1, если леджер расшарен."}
+      required: [user_id, ledger_id, wallet_count, operation_count, first_operation_date, last_operation_date, member_count]
+
+    UserStatsReport:
+      type: object
+      properties:
+        users:
+          type: array
+          items: {$ref: "#/components/schemas/UserStatsRow"}
+          description: "По одной строке на каждого владельца леджера, ORDER BY user_id."
+      required: [users]
