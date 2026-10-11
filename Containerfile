@@ -44,8 +44,9 @@ COPY scripts/ scripts/
 # provisioning — см. её README) — WALLET_REPORT_BUILD_INTEGRATION_TESTS уже
 # OFF по умолчанию (см. CMakeLists.txt), поэтому configure и без явного флага
 # не пытается зайти в эту директорию.
+ARG BUILD_JOBS=3
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DGIT_COMMIT="${GIT_COMMIT}" \
-    && cmake --build build --config Release -j"$(nproc)"
+    && cmake --build build --config Release -j"${BUILD_JOBS}"
 
 FROM debian:bookworm-slim AS runtime
 
