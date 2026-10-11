@@ -375,8 +375,8 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
                                     const std::string& step, const std::string& eq_currency_uuid,
                                     bool with_accounts);
 
-// Админ-таблица (GET /api/reports/admin/users, только Role::Admin, см.
-// reports.cpp) — по одной строке на КАЖДОГО владельца леджера (роль
+// Админ-таблица (POST /api/reports/admin/users/stats, только Role::Admin, см.
+// reports.cpp) — по одной строке на каждого ИЗ ПЕРЕДАННЫХ владельцев леджера (роль
 // 'owner' в ledger_member), не на весь ledger_member: MVP держит один
 // леджер на пользователя (см. org/docs/TODO_mobile_sync.md, п. 1.3), поэтому
 // "владелец" здесь и есть "пользователь", а не отдельная сущность. Если
@@ -398,7 +398,8 @@ struct UserStatsResult {
     nlohmann::json users = nlohmann::json::array();
 };
 
-UserStatsResult list_user_stats(db::Database& db);
+// user_ids — уже проверенные на формат UUID (reports.cpp); пустой список — пустой ответ без запроса.
+UserStatsResult list_user_stats(db::Database& db, const std::vector<std::string>& user_ids);
 
 // Иконки (GET /api/reports/admin/icons, только Role::Admin, и
 // GET /api/reports/icons — свои, см. reports.cpp)

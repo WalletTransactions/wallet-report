@@ -1,5 +1,6 @@
 #include "reports.hpp"
 
+#include <cctype>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -638,21 +639,39 @@ void handle_icons(AppState& state, const httplib::Request& req, httplib::Respons
     res.set_content(json{{"common", result.common}, {"user", result.user}}.dump(), kJsonContentType);
 }
 
-// Админ-таблица (wallet-web/site/app.js::renderAdmin()) — агрегаты
-// ПО ВСЕМ пользователям разом, не по леджеру вызывающего: число кошельков,
-// число операций, даты первой/последней операции, число участников
-// леджера (см. reports_repo::list_user_stats). Только Role::Admin — тот же
-// принцип, что и у списка пользователей в google-auth (support туда тоже
-// не допущен, см. его admin.cpp).
+// Админ-таблица (wallet-web/site/app.js::renderAdmin()) — агрегаты по
+// пользователям, которых SPA уже получила из google-auth GET /admin/users:
+// число кошельков, число операций, даты первой/последней операции, число
+// участников леджера (см. reports_repo::list_user_stats). Только Role::Admin —
+// тот же принцип, что и у списка пользователей в google-auth (support туда
+// тоже не допущен, см. его admin.cpp).
 //
-// Путь — /api/reports/admin/users, а не /admin/users/stats: остаётся под
-// уже существующим префиксом /api/reports/*, который wallet-gateway и так
-// маршрутизирует на wallet-report (см. его README, "Порядок важен") — без
-// этого пришлось бы отдельно учить гейтвей, что /admin/* в этом ОДНОМ
-// случае должен уйти не на google-auth, как везде остальные /admin/*, а
-// сюда.
+// POST с телом {"user_ids": [...]}, а не GET: считается только по
+// переданным id. Прежний GET /api/reports/admin/users считал по ВСЕМ
+// владельцам леджеров базы — на стенде с данными нагрузочного теста это
+// 4181 леджер, 15,8 с и 1 МБ JSON ради двух строк таблицы. Список id в теле,
+// а не в query: на сотнях пользователей URL упёрся бы в лимиты прокси.
+//
+// Путь — под /api/reports/*, а не /admin/*: остаётся на этом сервисе без
+// правки маршрутизации wallet-gateway (см. его README, "Порядок важен" —
+// /admin/* целиком уходит на google-auth).
+constexpr size_t kMaxStatsUserIds = 5000;
+
+bool is_uuid(const std::string& s) {
+    if (s.size() != 36) return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void handle_admin_user_stats(AppState& state, const httplib::Request& req, httplib::Response& res) {
-    applog::set_route("GET /api/reports/admin/users"); // литерал из register_routes ниже
+    applog::set_route("POST /api/reports/admin/users/stats"); // литерал из register_routes ниже
     auto user = session::current_user(req, *state.jwks);
     if (!user) {
         json_error(res, 401, "unauthenticated");
@@ -663,7 +682,25 @@ void handle_admin_user_stats(AppState& state, const httplib::Request& req, httpl
         return;
     }
 
-    auto result = reports_repo::list_user_stats(*state.reports_pool->acquire());
+    json body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+    if (!body.is_object() || !body.contains("user_ids") || !body["user_ids"].is_array()) {
+        json_error(res, 400, "ожидается тело {\"user_ids\": [uuid, ...]}");
+        return;
+    }
+    if (body["user_ids"].size() > kMaxStatsUserIds) {
+        json_error(res, 400, "user_ids: не больше " + std::to_string(kMaxStatsUserIds));
+        return;
+    }
+    std::vector<std::string> user_ids;
+    for (const auto& id : body["user_ids"]) {
+        if (!id.is_string() || !is_uuid(id.get<std::string>())) {
+            json_error(res, 400, "user_ids: каждый элемент — UUID строкой");
+            return;
+        }
+        user_ids.push_back(id.get<std::string>());
+    }
+
+    auto result = reports_repo::list_user_stats(*state.reports_pool->acquire(), user_ids);
     res.set_content(json{{"users", result.users}}.dump(), kJsonContentType);
 }
 
@@ -752,10 +789,10 @@ void register_routes(httplib::Server& svr, AppState& state) {
     svr.Get("/api/reports/icons", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_icons(state, req, res);
     });
-    svr.Get("/api/reports/admin/users",
-            [&state](const httplib::Request& req, httplib::Response& res) {
-                handle_admin_user_stats(state, req, res);
-            });
+    svr.Post("/api/reports/admin/users/stats",
+             [&state](const httplib::Request& req, httplib::Response& res) {
+                 handle_admin_user_stats(state, req, res);
+             });
     svr.Get("/api/reports/admin/icons",
             [&state](const httplib::Request& req, httplib::Response& res) {
                 handle_admin_icons(state, req, res);

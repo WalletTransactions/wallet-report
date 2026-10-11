@@ -658,40 +658,60 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
     return out;
 }
 
-UserStatsResult list_user_stats(db::Database& db) {
-    // Три коррелированных подзапроса вместо одного JOIN account_operating +
-    // operation — намеренно: совместный JOIN дал бы (число кошельков ×
-    // число операций) строк на леджер и раздул бы результат, у count(DISTINCT
-    // ...) с ним пришлось бы бороться отдельно. Подзапросы читаются как
-    // отдельные, точные вопросы ("сколько кошельков", "сколько операций",
-    // "когда первая/последняя") и не создают этот перемножающий JOIN —
-    // ценой N обращений на леджер вместо одного, что для админ-таблицы
-    // (штучные вызовы, не горячий путь) вполне приемлемо.
+UserStatsResult list_user_stats(db::Database& db, const std::vector<std::string>& user_ids) {
+    UserStatsResult out;
+    if (user_ids.empty()) return out;
+
+    // Только леджеры переданных пользователей и одним проходом по каждой
+    // таблице: CTE owners сужает выборку до них, дальше по одному GROUP BY
+    // на операции, кошельки и участников. Прежний вариант — три
+    // коррелированных подзапроса НА КАЖДЫЙ леджер базы — считал всех
+    // владельцев разом: на стенде с данными нагрузочного теста (4181 леджер
+    // по 3000 операций) это 15,8 с и 1 МБ JSON, из которого таблица брала две
+    // строки. Отдельные GROUP BY, а не один JOIN операций с кошельками, —
+    // тот перемножил бы строки (кошельки × операции) на леджер.
     //
+    // Список id — массивом в одном параметре ($1::uuid[]), литералом
+    // Postgres '{a,b}': id уже проверены на формат UUID в reports.cpp, так что
+    // ни запятых, ни скобок внутри быть не может.
+    std::string ids_literal = "{";
+    for (size_t i = 0; i < user_ids.size(); ++i) {
+        if (i) ids_literal += ',';
+        ids_literal += user_ids[i];
+    }
+    ids_literal += '}';
+
     // a.kind = 1 — явный признак "это кошелёк, не категория" (см.
-    // wallet-api/schema/table/account.sql), дешевле и надёжнее, чем JOIN
-    // account_operating ради того же факта.
+    // wallet-api/schema/table/account.sql).
     auto res = db.exec(
-        "SELECT lm.user_id, lm.ledger_id, "
-        "  (SELECT count(*) FROM account a "
-        "     WHERE a.ledger_id = lm.ledger_id AND a.kind = 1 AND a.deleted_at IS NULL) AS wallet_count, "
-        "  (SELECT count(*) FROM operation o "
-        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS operation_count, "
-        "  (SELECT min(o.date) FROM operation o "
-        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS first_operation_date, "
-        "  (SELECT max(o.date) FROM operation o "
-        "     WHERE o.ledger_id = lm.ledger_id AND o.deleted_at IS NULL) AS last_operation_date, "
-        "  (SELECT count(*) FROM ledger_member m2 WHERE m2.ledger_id = lm.ledger_id) AS member_count "
-        "FROM ledger_member lm "
-        "WHERE lm.role = 'owner' "
-        "ORDER BY lm.user_id");
+        "WITH owners AS ("
+        "  SELECT user_id, ledger_id FROM ledger_member"
+        "   WHERE role = 'owner' AND user_id = ANY($1::uuid[])), "
+        "ops AS ("
+        "  SELECT o.ledger_id, count(*) AS n, min(o.date) AS first_date, max(o.date) AS last_date"
+        "    FROM operation o JOIN owners ow ON ow.ledger_id = o.ledger_id"
+        "   WHERE o.deleted_at IS NULL GROUP BY o.ledger_id), "
+        "wallets AS ("
+        "  SELECT a.ledger_id, count(*) AS n"
+        "    FROM account a JOIN owners ow ON ow.ledger_id = a.ledger_id"
+        "   WHERE a.kind = 1 AND a.deleted_at IS NULL GROUP BY a.ledger_id), "
+        "members AS ("
+        "  SELECT m.ledger_id, count(*) AS n"
+        "    FROM ledger_member m JOIN owners ow ON ow.ledger_id = m.ledger_id GROUP BY m.ledger_id) "
+        "SELECT ow.user_id, ow.ledger_id, coalesce(w.n, 0), coalesce(op.n, 0),"
+        "       op.first_date, op.last_date, coalesce(mb.n, 0) "
+        "  FROM owners ow"
+        "  LEFT JOIN ops op ON op.ledger_id = ow.ledger_id"
+        "  LEFT JOIN wallets w ON w.ledger_id = ow.ledger_id"
+        "  LEFT JOIN members mb ON mb.ledger_id = ow.ledger_id "
+        " ORDER BY ow.user_id",
+        {ids_literal});
 
     static const std::vector<std::string> kColumns = {
         "user_id", "ledger_id", "wallet_count", "operation_count",
         "first_operation_date", "last_operation_date", "member_count",
     };
 
-    UserStatsResult out;
     for (const auto& row : res.rows) out.users.push_back(row_to_json(row.fields, kColumns));
     return out;
 }

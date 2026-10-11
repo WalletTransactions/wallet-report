@@ -662,24 +662,46 @@ paths:
           content:
             application/json: {schema: {$ref: "#/components/schemas/IconsReport"}}
 
-  /api/reports/admin/users:
-    get:
-      operationId: reportAdminUsers
-      summary: "Админ-таблица: агрегаты по ВСЕМ пользователям (только Role::Admin)"
+  /api/reports/admin/users/stats:
+    post:
+      operationId: reportAdminUserStats
+      summary: "Админ-таблица: агрегаты по переданным пользователям (только Role::Admin)"
       description: |
-        Не отчёт по своему леджеру, а список по КАЖДОМУ владельцу леджера
-        (роль `owner` в `ledger_member`) — число кошельков, число операций,
-        даты первой/последней операции, число участников леджера (см.
-        `reports_repo::list_user_stats`). Используется таблицей
-        "Пользователи" в SPA (`app.js::renderAdmin()`), сшивается там с
-        `GET /admin/users` (google-auth) по `user_id`.
+        Не отчёт по своему леджеру, а строка на каждого из переданных
+        пользователей, кто владеет леджером (роль `owner` в `ledger_member`) —
+        число кошельков, число операций, даты первой/последней операции, число
+        участников леджера (см. `reports_repo::list_user_stats`). Считается на
+        СУБД одним `GROUP BY` только по леджерам этих пользователей.
+        Используется таблицей "Пользователи" в SPA (`app.js::renderAdmin()`):
+        id берутся из `GET /admin/users` (google-auth), ответ сшивается с ним
+        по `user_id`. Пользователь без леджера в ответ не попадает.
+
+        Заменил `GET /api/reports/admin/users` (2026-10-11), который считал по
+        ВСЕМ владельцам базы: на стенде с данными нагрузочного теста 15,8 с и
+        1 МБ JSON ради двух строк таблицы.
 
         Путь под `/api/reports/*`, а не `/admin/*` — остаётся на
         wallet-report без правки маршрутизации wallet-gateway (см. его
         README, "Порядок важен" — `/admin/*` целиком уходит на google-auth).
       tags: [reports]
       security: [{bearerAuth: [], sessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_ids:
+                  type: array
+                  maxItems: 5000
+                  items: {type: string, format: uuid}
+              required: [user_ids]
       responses:
+        "400":
+          description: Тело не `{"user_ids": [...]}`, элемент не UUID или больше 5000 id
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
         "401":
           description: Не аутентифицирован
           content:
@@ -689,7 +711,7 @@ paths:
           content:
             application/json: {schema: {$ref: "#/components/schemas/Error"}}
         "200":
-          description: По одной строке на каждого владельца леджера
+          description: По одной строке на каждого переданного владельца леджера
           content:
             application/json: {schema: {$ref: "#/components/schemas/UserStatsReport"}}
 

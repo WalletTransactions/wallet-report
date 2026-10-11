@@ -20,9 +20,9 @@
 // as_user_id у ЛЮБОГО из этих же эндпоинтов подменяет леджер на леджер
 // указанного пользователя (см. reports.cpp::resolve_subject_user_id) —
 // отдельных /admin/*-копий отчётов нет. Плюс один настоящий admin-only
-// эндпоинт без аналога у обычного пользователя — GET /api/reports/admin/users
-// (агрегаты по ВСЕМ пользователям для админ-таблицы, см.
-// reports_repo::list_user_stats).
+// эндпоинт без аналога у обычного пользователя — POST
+// /api/reports/admin/users/stats (агрегаты по переданным пользователям для
+// админ-таблицы, см. reports_repo::list_user_stats).
 #pragma once
 
 #include "app_state.hpp"
