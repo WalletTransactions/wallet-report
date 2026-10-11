@@ -22,14 +22,15 @@ if(WALLET_REPORT_BUILD_INTEGRATION_TESTS)
         ${CMAKE_SOURCE_DIR}/src/reports_repo.cpp
         ${CMAKE_SOURCE_DIR}/src/provisioning.cpp
         ${CMAKE_SOURCE_DIR}/src/sync_repo.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/uuid.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/hex.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/log.cpp
+        ${WALLET_COMMON_DIR}/util/uuid.cpp
+        ${WALLET_COMMON_DIR}/util/hex.cpp
+        ${WALLET_COMMON_DIR}/util/log.cpp
     )
 
     target_include_directories(wallet_report_integration_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party
+        ${WALLET_COMMON_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
@@ -43,6 +44,8 @@ if(WALLET_REPORT_BUILD_INTEGRATION_TESTS)
     target_link_libraries(wallet_report_integration_tests PRIVATE
         Threads::Threads
         PostgreSQL::PostgreSQL
+        # util/uuid.cpp (wallet-common) — v5 через SHA-1 OpenSSL.
+        OpenSSL::Crypto
     )
 
     if(WIN32)
@@ -66,14 +69,15 @@ if(WALLET_REPORT_BUILD_LOADTEST_SEED)
         ${CMAKE_SOURCE_DIR}/src/db.cpp
         ${CMAKE_SOURCE_DIR}/src/provisioning.cpp
         ${CMAKE_SOURCE_DIR}/src/sync_repo.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/uuid.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/hex.cpp
-        ${CMAKE_SOURCE_DIR}/src/util/log.cpp
+        ${WALLET_COMMON_DIR}/util/uuid.cpp
+        ${WALLET_COMMON_DIR}/util/hex.cpp
+        ${WALLET_COMMON_DIR}/util/log.cpp
     )
 
     target_include_directories(wallet_report_loadtest_seed PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party
+        ${WALLET_COMMON_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
@@ -87,6 +91,8 @@ if(WALLET_REPORT_BUILD_LOADTEST_SEED)
     target_link_libraries(wallet_report_loadtest_seed PRIVATE
         Threads::Threads
         PostgreSQL::PostgreSQL
+        # util/uuid.cpp (wallet-common) — v5 через SHA-1 OpenSSL.
+        OpenSSL::Crypto
     )
 
     if(WIN32)
