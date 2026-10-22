@@ -41,9 +41,9 @@
 - **WHEN** токен адресован wallet-report, но не содержит `reports:read`
 - **THEN** сервис отвечает 403 `insufficient_scope`
 
-#### Scenario: Legacy-токен без aud
+#### Scenario: Токен старого формата без aud
 - **WHEN** токен с верной подписью не содержит `aud`
-- **THEN** запрос пропускается, в лог пишется `jwt_legacy`, метрика `jwt_claims_total{result="legacy"}` растёт
+- **THEN** сервис отвечает 401 `invalid_token` («токен старого формата — войдите заново»), событие `jwt_rejected` с `reason: legacy` пишется в лог, метрика `jwt_claims_total{result="legacy"}` растёт
 
 ### Requirement: Роль из claim
 Роль пользователя SHALL браться из claim `role` проверенного токена; сервис
