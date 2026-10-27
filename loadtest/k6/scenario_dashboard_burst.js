@@ -18,7 +18,7 @@ import { pickToken } from './lib/tokens.js';
 import { buildReportRequests } from './lib/endpoints.js';
 import { SUMMARY_OPTIONS } from './lib/summary_options.js';
 
-const BASE_URL = __ENV.GATEWAY_URL || 'http://localhost:8090';
+const BASE_URL = __ENV.GATEWAY_URL || 'http://localhost:8091';
 
 export const options = {
     ...SUMMARY_OPTIONS,

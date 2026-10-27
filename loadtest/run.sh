@@ -9,10 +9,9 @@
 #
 # После — сразу k6 (см. README.md, "Шаг 3").
 #
-# Требует: `podman compose --env-file infra/db/.env up -d` уже выполнен
-# (сервис "db" поднят и здоров). Сеть контейнера "db" находится динамически
-# (тот же приём, что в ../tests_integration/run_local.sh) — имя сети зависит
-# от имени каталога проекта, поэтому не хардкодится.
+# Требует: контур test поднят (wallet-infra/infra/env/up.sh test). Сид,
+# токены и нагрузка — только в test (wallet-infra/infra/env/loadtest_env.sh:
+# prod запрещён); его db, сеть и ключ подписи берутся оттуда же.
 set -euo pipefail
 
 # MSYS (Git Bash на Windows) переписывает абсолютные unix-пути в аргументах
@@ -27,20 +26,9 @@ GA_DIR="$WORKSPACE_DIR/google-auth"
 DATA_DIR="$SCRIPT_DIR/data"
 mkdir -p "$DATA_DIR"
 
-ENV_FILE="$WORKSPACE_DIR/wallet-infra/infra/db/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "Не найден $ENV_FILE — сначала: cp infra/db/.env.example infra/db/.env" >&2
-    exit 1
-fi
-set -a
-source "$ENV_FILE"
-set +a
-
-PEM_PATH="$GA_DIR/jwt_signing_key.pem"
-if [[ ! -f "$PEM_PATH" ]]; then
-    echo "Не найден $PEM_PATH — см. wallet-infra/README.md, шаг openssl genrsa." >&2
-    exit 1
-fi
+# shellcheck source=../../wallet-infra/infra/env/loadtest_env.sh
+source "$WORKSPACE_DIR/wallet-infra/infra/env/loadtest_env.sh"
+PEM_PATH="$LOADTEST_PEM"
 
 # Движок контейнеров — podman (изначальная разработка) или docker (на этой
 # машине podman не установлен вовсе) — берём тот, что реально есть в PATH.
@@ -53,23 +41,7 @@ else
     exit 1
 fi
 
-# --- Найти запущенный контейнер "db" и его сеть (см. run_local.sh — тот же
-#     приём: имя контейнера/сети зависит от имени каталога проекта и от
-#     того, какой compose-provider реально исполнял `podman compose`). ---
-db_container="$("$ENGINE" ps --filter "label=io.podman.compose.service=db" --format '{{.Names}}' | head -n1)"
-if [[ -z "$db_container" ]]; then
-    db_container="$("$ENGINE" ps --filter "label=com.docker.compose.service=db" --format '{{.Names}}' | head -n1)"
-fi
-if [[ -z "$db_container" ]]; then
-    echo "Не нашёл запущенный контейнер 'db'. Сначала: podman compose --env-file infra/db/.env up -d" >&2
-    exit 1
-fi
-db_network="$("$ENGINE" inspect "$db_container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
-if [[ -z "$db_network" ]]; then
-    echo "Не нашёл сеть контейнера '$db_container'." >&2
-    exit 1
-fi
-echo "==> db: контейнер=$db_container сеть=$db_network"
+db_network="$LOADTEST_NETWORK"
 
 # build-loadtest/ собирается в именованный docker volume, а не прямо в
 # смонтированные $WR_DIR/$GA_DIR — репозиторий часто лежит на NTFS/exFAT
@@ -146,6 +118,7 @@ echo "==> Минтю токены (TTL=${TTL_SECS:-86400}с)"
     -v "$WR_DIR:/wr" \
     -v "$GA_DIR:/ga" \
     -v "$GA_BUILD_VOL:/ga/build-loadtest" \
+    -v "$PEM_PATH:/key.pem:ro" \
     -e TTL_SECS="${TTL_SECS:-86400}" \
     debian:bookworm-slim bash -c '
     set -e
@@ -160,7 +133,7 @@ echo "==> Минтю токены (TTL=${TTL_SECS:-86400}с)"
     for i in $(seq 0 $((count - 1))); do
         user_id=$(jq -r ".[$i].user_id" "$users")
         email=$(jq -r ".[$i].email" "$users")
-        token=$(/ga/build-loadtest/mint_loadtest_token --pem /ga/jwt_signing_key.pem \
+        token=$(/ga/build-loadtest/mint_loadtest_token --pem /key.pem \
             --sub "$user_id" --email "$email" --ttl-secs "$TTL_SECS")
         jq --arg uid "$user_id" --arg tok "$token" ". + [{\"user_id\": \$uid, \"token\": \$tok}]" "$tmp" > "$tmp.next"
         mv "$tmp.next" "$tmp"
@@ -172,4 +145,4 @@ echo "==> Минтю токены (TTL=${TTL_SECS:-86400}с)"
 echo "==> Готово: $DATA_DIR/users.json, $DATA_DIR/tokens.json"
 echo "==> Дальше: k6 (см. README.md, Шаг 3) — например, проверить руками:"
 echo "    T=\$(grep -o '\"token\": *\"[^\"]*\"' \"$DATA_DIR/tokens.json\" | head -1 | sed -E 's/.*\"([^\"]+)\"\$/\\1/')"
-echo "    curl -H \"Authorization: Bearer \$T\" http://localhost:8090/api/reports/currencies"
+echo "    curl -H \"Authorization: Bearer \$T\" http://localhost:8091/api/reports/currencies"

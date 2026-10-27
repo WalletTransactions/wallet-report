@@ -20,7 +20,7 @@ import { pickToken } from './lib/tokens.js';
 import { buildReportRequests } from './lib/endpoints.js';
 import { SUMMARY_OPTIONS } from './lib/summary_options.js';
 
-const BASE_URL = __ENV.GATEWAY_URL || 'http://localhost:8090';
+const BASE_URL = __ENV.GATEWAY_URL || 'http://localhost:8091';
 const VUS = Number(__ENV.VUS || 20);
 const DURATION = __ENV.DURATION || '2m';
 

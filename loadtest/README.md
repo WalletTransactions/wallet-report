@@ -5,7 +5,8 @@
 эффект "один тяжёлый отчёт блокирует всех остальных", и помогает подобрать
 разумный размер пула.
 
-Нагрузка идёт **через `wallet-gateway`** (порт `8090`), не напрямую в
+Нагрузка идёт **через `wallet-gateway` контура test** (`:8091` с хоста,
+`wallet-gateway:8090` в сети `wallet-test`), не напрямую в
 `wallet-report` (`8084`) — так, как реально ходит браузер/мобильный клиент.
 Из-за этого в измерение попадают ещё два фактора, которые сейчас НЕ
 доработаны (см. "Как читать результаты" ниже):
@@ -32,7 +33,11 @@ k6 --(Bearer JWT)--> wallet-gateway:8090 --(JWT verify #1, свой JWKS-кэш)
 
 Гейтвей не переписывает путь (`out.path = req.target`) — значит k6 бьёт в
 те же `/api/reports/...`, что описаны в `../openapi.yaml`, только через
-`localhost:8090` вместо `localhost:8084`.
+`localhost:8091` вместо прямого порта wallet-report.
+
+Только контур **test**: сид, токены и нагрузка в prod запрещены
+(`wallet-infra/infra/env/loadtest_env.sh` — его подключают все скрипты
+этого каталога; db, сеть и ключ подписи берутся из контура test).
 
 ## Шаги 1-2. Засеять данные и смин­тить токены — одним скриптом
 
@@ -40,9 +45,9 @@ k6 --(Bearer JWT)--> wallet-gateway:8090 --(JWT verify #1, свой JWKS-кэш)
 новых инструмента (`wallet_report_loadtest_seed`, `mint_loadtest_token`)
 собираются и выполняются в одноразовом `debian:bookworm-slim` (те же
 зависимости, что в `Containerfile` самих сервисов), тем же приёмом, что и
-`../tests_integration/run_local.sh`: сеть/контейнер "db" находятся
-динамически (имя сети зависит от имени каталога проекта — не хардкодится),
-креды — из `infra/db/.env`, наружу не печатаются.
+`../tests_integration/run_local.sh`, в сети контура test (`wallet-test`,
+хост `db`); креды — из `~/.config/wallet-secrets/test/db.env`, наружу не
+печатаются.
 
 Сам `build-loadtest/` (и `../../google-auth/build-loadtest/`) собирается не
 прямо в смонтированный `$WR_DIR`/`$GA_DIR`, а в именованный docker volume
@@ -58,8 +63,7 @@ exec-бит работает как положено; исходники и ос
 `test -x` по host-пути (файл в volume, с хоста не виден), а `docker/podman
 volume inspect` + разовым `test -x` внутри контейнера с этим volume.
 
-Требование: стек уже поднят (`podman compose --env-file infra/db/.env up -d`),
-включая сервис `db`.
+Требование: контур test поднят (`wallet-infra/infra/env/up.sh test`).
 
 ```bash
 bash run.sh
@@ -70,8 +74,8 @@ bash run.sh
 1. Собирает оба инструмента в `build-loadtest/` рядом с исходниками (только
    при первом запуске или если поправили C++-код — `LOADTEST_FORCE_REBUILD=1`
    форсирует пересборку).
-2. Сеет данные **в ту же dev-базу**, что уже поднята стеком (роль
-   `WALLET_POSTGRES_USER`, сеть контейнера `db`, хост `db:5432`) — НЕ в
+2. Сеет данные **в базу wallet контура test** (роль
+   `WALLET_POSTGRES_USER`, сеть `wallet-test`, хост `db:5432`) — НЕ в
    отдельную одноразовую базу, как `run_local.sh` — чтобы нагрузка потом
    била ровно в тот контейнер `wallet-report`, который вы тюните. По
    умолчанию — 5 синтетических пользователей (`LOADTEST_USERS`), у каждого
@@ -84,9 +88,9 @@ bash run.sh
    найти и выпилить потом, если понадобится.
 3. Минтит по одному токену на пользователя (`mint_loadtest_token` — тот же
    код, что подписывает настоящие access-токены google-auth,
-   `crypto::RsaSigningKey` + `jwt::sign_rs256`, читает реальный
-   `google-auth/jwt_signing_key.pem` вашего dev-стека). **Только для
-   локальной разработки** — не гоняйте против стенда с боевым ключом. TTL —
+   `crypto::RsaSigningKey` + `jwt::sign_rs256`, ключ контура test —
+   `~/.config/wallet-secrets/test/jwt_signing_key.pem`). Ключ prod сюда не
+   подставляется никогда. TTL —
    24 часа по умолчанию (`TTL_SECS`), с запасом на весь прогон нагрузки.
 
 Пример: `LOADTEST_USERS=1 LOADTEST_OPS_PER_USER=50 bash run.sh` — быстрый
@@ -102,20 +106,17 @@ wallet-report):
 # Без зависимости от jq на хосте (внутри run.sh он есть — в контейнере;
 # здесь просто достаём первый токен из уже готового файла).
 T=$(grep -o '"token": *"[^"]*"' data/tokens.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
-curl -H "Authorization: Bearer $T" http://localhost:8090/api/reports/currencies
+curl -H "Authorization: Bearer $T" http://localhost:8091/api/reports/currencies
 # ожидается 200, не 401
 ```
 
 ## Шаг 3. Прогнать сценарии (k6)
 
-Нет своего k6 — установите нативно, либо гоняйте контейнером в сети compose
-(имя сети — `<имя_каталога_проекта>_wallet-net`, у стандартного чекаута это
-`servers_wallet-net`; своё уточните через `podman network ls`, если не
-совпадает, — тот же способ, что видит браузер через гейтвей, не зависит от
-особенностей port-forwarding podman-machine):
+Нет своего k6 — установите нативно, либо гоняйте контейнером в сети
+контура test:
 
 ```bash
-podman run --rm --network servers_wallet-net \
+docker run --rm --network wallet-test \
   -v "$(pwd)/k6:/scripts:ro" \
   -v "$(pwd)/data:/data:ro" \
   -e GATEWAY_URL=http://wallet-gateway:8090 \
@@ -123,10 +124,11 @@ podman run --rm --network servers_wallet-net \
   docker.io/grafana/k6 run /scripts/scenario_smoke.js
 ```
 
-Нативно (проще для быстрой итерации, `8090` уже опубликован на хост):
+Нативно (гейтвей test опубликован на хост как `:8091`; `:8090` — prod,
+туда нельзя):
 
 ```bash
-GATEWAY_URL=http://localhost:8090 TOKENS_FILE=./data/tokens.json \
+GATEWAY_URL=http://localhost:8091 TOKENS_FILE=./data/tokens.json \
   k6 run k6/scenario_smoke.js
 ```
 
@@ -150,36 +152,32 @@ GATEWAY_URL=http://localhost:8090 TOKENS_FILE=./data/tokens.json \
 тот же путь блокировки), тот же код, просто N=1. Поэтому "было / стало"
 сравнивается ОДНОЙ переменной окружения, без отдельной сборки старой версии.
 
-`wallet-report/.env` править не обязательно (и без доступа на чтение к нему
-у ассистента иначе не проверить, что реально применилось) — есть
-`../../compose.loadtest-override.yaml`: отдельный compose-файл поверх
-основного, задаёт `REPORTS_DB_POOL_SIZE` только для одного пересоздания
-контейнера, ничего не трогая в самом `.env`:
+Секреты контура править не нужно: `loadtest_override` из
+`wallet-infra/infra/env/loadtest_env.sh` пересоздаёт wallet-report контура
+test с другим `REPORTS_DB_POOL_SIZE` под блокировкой контура (не посреди
+выката), `loadtest_restore` возвращает обычную конфигурацию. Следующий выкат
+wallet-report в test тоже вернёт её сам.
 
 ```bash
-cd ../..   # servers/
+LT=../../wallet-infra/infra/env/loadtest_env.sh
 
-# 1. "Как было" (эмуляция): применяем оверлей → REPORTS_DB_POOL_SIZE=1.
-podman compose --env-file infra/db/.env -f compose.yaml -f compose.loadtest-override.yaml \
-  up -d wallet-report
-cd wallet-report/loadtest
-podman run --rm --network servers_wallet-net --user "$(id -u):$(id -g)" \
-  -v "$(pwd -W)/k6:/scripts:ro" -v "$(pwd -W)/data:/data" \
+# 1. "Как было" (эмуляция): REPORTS_DB_POOL_SIZE=1.
+bash -c "source $LT && loadtest_override wallet-report REPORTS_DB_POOL_SIZE 1"
+docker run --rm --network wallet-test --user "$(id -u):$(id -g)" \
+  -v "$(pwd)/k6:/scripts:ro" -v "$(pwd)/data:/data" \
   -e GATEWAY_URL=http://wallet-gateway:8090 -e TOKENS_FILE=/data/tokens.json \
   -e VUS=15 -e DURATION=45s \
   docker.io/grafana/k6 run --summary-export=/data/result_pool1.json k6/scenario_pool_saturation.js
 
-# 2. "Как стало" — снять оверлей (вернуться к обычному .env, дефолт 8):
-cd ../..
-podman compose --env-file infra/db/.env up -d wallet-report
-cd wallet-report/loadtest
-podman run --rm --network servers_wallet-net --user "$(id -u):$(id -g)" \
-  -v "$(pwd -W)/k6:/scripts:ro" -v "$(pwd -W)/data:/data" \
+# 2. "Как стало" — вернуть конфигурацию контура (дефолт 8):
+bash -c "source $LT && loadtest_restore wallet-report"
+docker run --rm --network wallet-test --user "$(id -u):$(id -g)" \
+  -v "$(pwd)/k6:/scripts:ro" -v "$(pwd)/data:/data" \
   -e GATEWAY_URL=http://wallet-gateway:8090 -e TOKENS_FILE=/data/tokens.json \
   -e VUS=15 -e DURATION=45s \
   docker.io/grafana/k6 run --summary-export=/data/result_pool8.json k6/scenario_pool_saturation.js
 
-# 3. Дополнительно 4/16/20 — поправить REPORTS_DB_POOL_SIZE в оверлее и
+# 3. Дополнительно 4/16/20 — loadtest_override с другим значением и
 #    повторить, чтобы найти точку, после которой рост пула перестаёт давать
 #    выигрыш. РЕАЛЬНЫЙ потолок — НЕ max_connections=100 Postgres (как
 #    предполагалось раньше) и не thread-pool гейтвея/wallet-report, а
@@ -254,7 +252,7 @@ JSON-строкой (`{"event":"request_finished","duration_ms":...}`, см.
 `../src/main.cpp`) — это время БЕЗ гейтвея и его невторично-используемого
 `httplib::Client`. Сравните:
 
-- **k6-задержка** (через `localhost:8090` — включает 2× JWT verify + connect
+- **k6-задержка** (через гейтвей test — включает 2× JWT verify + connect
   overhead гейтвея к апстриму + сам wallet-report);
 - **`duration_ms` из логов wallet-report** (только сам сервис: JWT verify +
   ожидание `Pool::acquire()` + SQL).
@@ -270,8 +268,8 @@ fluent-bit (`../../infra/logging/fluent-bit.conf`) был написан до п
 этого сервиса и включал только
 `db|redis|google-auth|wallet-api|wallet-web|wallet-gateway` — `wallet-report`
 в регэкспе не было вовсе, его логи молча дропались. Исправлено (добавлен в
-whitelist, `podman restart servers-fluent-bit-1` подхватывает новый конфиг)
-и живьём проверено — сейчас доходят.
+whitelist) и живьём проверено — сейчас доходят. Теперь whitelist — по
+префиксам контуров `wallet-prod-`/`wallet-test-`, у записи есть поле `env`.
 
 Смотреть можно через Dashboards (`http://localhost:15601`), либо запросом
 напрямую к OpenSearch (проще для скриптовой сверки):
@@ -280,7 +278,7 @@ whitelist, `podman restart servers-fluent-bit-1` подхватывает нов
 curl -s "http://localhost:19200/wallet-logs/_search" -H "Content-Type: application/json" -d '{
   "size": 0,
   "query": {"bool": {"filter": [
-    {"term": {"container_name.keyword": "servers-wallet-report-1"}},
+    {"term": {"container_name.keyword": "wallet-test-wallet-report-1"}},
     {"term": {"event.keyword": "request_finished"}},
     {"range": {"@timestamp": {"gte": "now-10m"}}}
   ]}},
@@ -305,17 +303,9 @@ concurrency из `CLIENT_LEVELS` и пишет результат в отдел�
 `perf_history` (`test_run`/`test_result`, см.
 `../../infra/db/migrations/perf/000001_init.up.sql`) — тот же инстанс
 Postgres, что и всё остальное (контейнер `db`), но своя роль/база, читает
-`perf_reader`, пишет `PERF_POSTGRES_USER` (см. `infra/db/.env.example`).
-
-Один раз — накатить миграцию (после того, как обычным порядком поднята "db"):
-
-```bash
-bash ../../infra/db/migrate.sh perf up
-```
-
-(или тем же job'ом в Jenkins — `BuildPlatform/jobs/db-migrate/`, параметр
-`TARGET=perf`, см. `BuildPlatform/jenkins/README.md`; до этого job'а миграции
-катились только руками.)
+`perf_reader`, пишет `PERF_POSTGRES_USER` (`db.env` контура test). База
+`perf_history` есть только в контуре test: её миграцию накатывает
+`wallet-infra/infra/env/up.sh test` вместе с остальными базами.
 
 Дальше — как `run.sh`, но записывает историю, а не просто печатает числа:
 
@@ -327,7 +317,8 @@ ENVIRONMENT=ci VERSION=1.4.0 CLIENT_LEVELS="10 30 60 120" bash record_run.sh
 
 Помимо RPS/latency/errors из k6, на каждый уровень заодно запрашивается
 Prometheus (`../../infra/monitoring/`, стек уже поднят) за средним CPU/RAM
-контейнера `wallet-report` ровно за окно этого уровня
+контейнера `wallet-report` контура test (по id контейнера — метка `name` у
+cAdvisor) и метриками Postgres с `env="test"` ровно за окно этого уровня
 (`avg_cpu_pct`/`avg_mem_bytes` в `test_result`) — если Prometheus недоступен,
 это просто остаётся `NULL`, остальная запись не блокируется.
 
@@ -454,7 +445,7 @@ loadtest/
 ../../infra/db/migrations/perf/         — миграция test_run/test_result + роль perf_reader (000001) +
                                            target_rate_max/dropped_iterations под find_the_wall (000002) +
                                            avg_pg_active_conns/avg_pg_cache_hit_pct/avg_pg_lock_waits (000003)
-                                           (см. infra/db/migrate.sh perf up, или Jenkins job db-migrate)
+                                           (накатывает infra/env/up.sh test — база только в контуре test)
 ../../infra/monitoring/postgres-exporter/queries.yaml — custom-запрос locks_waiting для avg_pg_lock_waits (000003)
 ../../infra/monitoring/grafana/dashboards/perf-history.json — дашборд "Perf History — Baseline vs Current"
 

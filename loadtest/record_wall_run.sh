@@ -31,14 +31,10 @@ WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DATA_DIR="$SCRIPT_DIR/data"
 mkdir -p "$DATA_DIR"
 
-ENV_FILE="$WORKSPACE_DIR/wallet-infra/infra/db/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "Не найден $ENV_FILE — сначала: cp infra/db/.env.example infra/db/.env" >&2
-    exit 1
-fi
-set -a
-source "$ENV_FILE"
-set +a
+# Контур test (wallet-infra/infra/env/loadtest_env.sh — prod запрещён), как
+# в record_run.sh.
+# shellcheck source=../../wallet-infra/infra/env/loadtest_env.sh
+source "$WORKSPACE_DIR/wallet-infra/infra/env/loadtest_env.sh"
 
 for bin in jq curl git; do
     command -v "$bin" >/dev/null 2>&1 || { echo "Нужен '$bin' на хосте." >&2; exit 1; }
@@ -47,15 +43,14 @@ done
 # --- Параметры прогона ---
 SCENARIO_FILE="${SCENARIO_FILE:-scenario_find_the_wall.js}"
 SCENARIO_NAME="${SCENARIO_FILE%.js}"
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:8090}"
+GATEWAY_URL="${GATEWAY_URL:-http://localhost:8091}"
 TOKENS_FILE="${TOKENS_FILE:-$DATA_DIR/tokens.json}"
-ENVIRONMENT="${ENVIRONMENT:-local-docker-compose}"
+ENVIRONMENT="${ENVIRONMENT:-$LOADTEST_ENV}"
 VERSION="${VERSION:-}"
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:19090}"
-# Подстрока в cAdvisor'овском лейбле "image", не "name" — см. комментарий у
-# того же PROM_CONTAINER_MATCH в record_run.sh (docker-обработчик у cAdvisor
-# отключён, "name" стал сырым container id).
-PROM_CONTAINER_MATCH="${PROM_CONTAINER_MATCH:-wallet-report}"
+# Сервис под нагрузкой — его контейнер в контуре test ищется по id в метке
+# cAdvisor "name" (см. PROM_SERVICE в record_run.sh).
+PROM_SERVICE="${PROM_SERVICE:-wallet-report}"
 PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-200}"
 MAX_VUS="${MAX_VUS:-1500}"
 # Пиковый target rate из stages scenario_find_the_wall.js (см. комментарий
@@ -82,14 +77,7 @@ branch="${BRANCH:-$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD)}"
 
 echo "==> commit=$commit_sha branch=$branch сценарий=$SCENARIO_NAME maxVUs=$MAX_VUS targetPeak=$TARGET_RATE_PEAK"
 
-db_container="$("$ENGINE" ps --filter "label=io.podman.compose.service=db" --format '{{.Names}}' | head -n1)"
-if [[ -z "$db_container" ]]; then
-    db_container="$("$ENGINE" ps --filter "label=com.docker.compose.service=db" --format '{{.Names}}' | head -n1)"
-fi
-if [[ -z "$db_container" ]]; then
-    echo "Не нашёл запущенный контейнер 'db'. Сначала: $ENGINE compose --env-file infra/db/.env up -d" >&2
-    exit 1
-fi
+db_container="$LOADTEST_DB_CONTAINER"
 
 use_native_k6=0
 if command -v k6 >/dev/null 2>&1; then
@@ -97,7 +85,7 @@ if command -v k6 >/dev/null 2>&1; then
     echo "==> k6: нативный (найден в PATH)"
 else
     echo "==> k6: нет в PATH — гоняю контейнером docker.io/grafana/k6 (см. README.md, Шаг 3)"
-    db_network="$("$ENGINE" inspect "$db_container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
+    db_network="$LOADTEST_NETWORK"
 fi
 
 # То же subquery-усреднение, что в record_run.sh — см. комментарий там же
@@ -155,14 +143,15 @@ vus_max="$(jq -r '(.metrics.vus_max.value // 0) | round' "$summary_path")"
 dropped="$(jq -r '.metrics.dropped_iterations.count // 0' "$summary_path")"
 
 duration_secs=$((end_ts - start_ts))
+prom_container_id="$(loadtest_container_id "$PROM_SERVICE")"
 
 echo "    requests=$requests rps=$rps p50=$p50 p90=$p90 p95=$p95 p99=$p99 err=$err vus_max=$vus_max dropped=$dropped"
 
 cpu_pct="$(prom_avg_over_window \
-    "(sum(rate(container_cpu_usage_seconds_total{image=~\".*${PROM_CONTAINER_MATCH}.*\"}[1m]))*100)[${duration_secs}s:15s]" \
+    "(sum(rate(container_cpu_usage_seconds_total{name=\"${prom_container_id}\"}[1m]))*100)[${duration_secs}s:15s]" \
     "$end_ts")"
 mem_bytes="$(prom_avg_over_window \
-    "(container_memory_usage_bytes{image=~\".*${PROM_CONTAINER_MATCH}.*\"})[${duration_secs}s:15s]" \
+    "(container_memory_usage_bytes{name=\"${prom_container_id}\"})[${duration_secs}s:15s]" \
     "$end_ts")"
 
 parameters_json="$(jq -n --arg scenario "$SCENARIO_FILE" \

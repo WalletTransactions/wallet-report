@@ -11,10 +11,9 @@
 # дашборде выбираются дропдаунами по ветке/коммиту среди уже записанных
 # прогонов, не как аргументы скрипта.
 #
-# Требования: стек поднят (`podman compose --env-file infra/db/.env up -d`,
-# включая "db" и "prometheus"), миграция perf накачена
-# (`bash ../../infra/db/migrate.sh perf up`), данные засеяны и токены
-# смintены (`bash run.sh`, см. README.md).
+# Требования: контур test поднят (wallet-infra/infra/env/up.sh test — он же
+# накатывает миграцию perf), стек метрик с Prometheus запущен, данные
+# засеяны и токены сминтены (`bash run.sh`, см. README.md).
 #
 # Использование:
 #   bash record_run.sh
@@ -36,14 +35,10 @@ WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DATA_DIR="$SCRIPT_DIR/data"
 mkdir -p "$DATA_DIR"
 
-ENV_FILE="$WORKSPACE_DIR/wallet-infra/infra/db/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "Не найден $ENV_FILE — сначала: cp infra/db/.env.example infra/db/.env" >&2
-    exit 1
-fi
-set -a
-source "$ENV_FILE"
-set +a
+# Контур test: сеть, db, PERF_POSTGRES_* из его db.env и id контейнеров для
+# cAdvisor (wallet-infra/infra/env/loadtest_env.sh — prod запрещён).
+# shellcheck source=../../wallet-infra/infra/env/loadtest_env.sh
+source "$WORKSPACE_DIR/wallet-infra/infra/env/loadtest_env.sh"
 
 for bin in jq curl git; do
     command -v "$bin" >/dev/null 2>&1 || { echo "Нужен '$bin' на хосте." >&2; exit 1; }
@@ -54,20 +49,15 @@ SCENARIO_FILE="${SCENARIO_FILE:-scenario_pool_saturation.js}"
 SCENARIO_NAME="${SCENARIO_NAME:-${SCENARIO_FILE%.js}}"
 CLIENT_LEVELS="${CLIENT_LEVELS:-10 30 60}"
 DURATION_SECS="${DURATION_SECS:-30}"
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:8090}"
+GATEWAY_URL="${GATEWAY_URL:-http://localhost:8091}"
 TOKENS_FILE="${TOKENS_FILE:-$DATA_DIR/tokens.json}"
-ENVIRONMENT="${ENVIRONMENT:-local-docker-compose}"
+ENVIRONMENT="${ENVIRONMENT:-$LOADTEST_ENV}"
 VERSION="${VERSION:-}"
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:19090}"
-# Подстрока в cAdvisor'овском лейбле "image" (НЕ "name" — с переходом Docker
-# на containerd-snapshotter и отключением докеровского обработчика у
-# cAdvisor, см. wallet-infra/compose.yaml/cadvisor, "name" стал сырым container
-# id, а не человекочитаемым именем; тот же довод, что у панелей
-# "Контейнеры" в wallet-overview.json — легенда там тоже по image).
-# "servers-wallet-report" в image (не голое "wallet-report") — имя образа
-# компоуз собирает из <имя_папки_проекта>-<имя_сервиса>, подстрокой надёжнее
-# полного совпадения (то же соображение, что раньше было про cAdvisor "name").
-PROM_CONTAINER_MATCH="${PROM_CONTAINER_MATCH:-wallet-report}"
+# Сервис под нагрузкой — его контейнер в контуре test ищется по id в метке
+# cAdvisor "name" (см. loadtest_container_id в loadtest_env.sh: по "image" prod
+# и test на одном теге не различить).
+PROM_SERVICE="${PROM_SERVICE:-wallet-report}"
 POOL_SIZE="${POOL_SIZE:-}"
 # База/роль reports_pool под нагрузкой (см. REPORTS_DATABASE_URL в
 # wallet-infra/compose.yaml, сервис "wallet-report") — по ним фильтруются
@@ -113,14 +103,7 @@ branch="${BRANCH:-$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD)}"
 
 echo "==> commit=$commit_sha branch=$branch сценарий=$SCENARIO_NAME уровни=[$CLIENT_LEVELS] по ${DURATION_SECS}с"
 
-db_container="$("$ENGINE" ps --filter "label=io.podman.compose.service=db" --format '{{.Names}}' | head -n1)"
-if [[ -z "$db_container" ]]; then
-    db_container="$("$ENGINE" ps --filter "label=com.docker.compose.service=db" --format '{{.Names}}' | head -n1)"
-fi
-if [[ -z "$db_container" ]]; then
-    echo "Не нашёл запущенный контейнер 'db'. Сначала: $ENGINE compose --env-file infra/db/.env up -d" >&2
-    exit 1
-fi
+db_container="$LOADTEST_DB_CONTAINER"
 
 use_native_k6=0
 if command -v k6 >/dev/null 2>&1; then
@@ -128,7 +111,7 @@ if command -v k6 >/dev/null 2>&1; then
     echo "==> k6: нативный (найден в PATH)"
 else
     echo "==> k6: нет в PATH — гоняю контейнером docker.io/grafana/k6 (см. README.md, Шаг 3)"
-    db_network="$("$ENGINE" inspect "$db_container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
+    db_network="$LOADTEST_NETWORK"
 fi
 
 # avg_over_time( <expr>[<window>s:15s] ) от времени end_ts — subquery
@@ -225,18 +208,19 @@ for clients in $CLIENT_LEVELS; do
     # DURATION_SECS — старт/стоп k6 и сам вызов curl добавляют секунды),
     # подставляется прямо в subquery-выражение (см. prom_avg_over_window).
     window_secs=$((end_ts - start_ts))
+    prom_container_id="$(loadtest_container_id "$PROM_SERVICE")"
     cpu_pct="$(prom_avg_over_window \
-        "(sum(rate(container_cpu_usage_seconds_total{image=~\".*${PROM_CONTAINER_MATCH}.*\"}[1m]))*100)[${window_secs}s:15s]" \
+        "(sum(rate(container_cpu_usage_seconds_total{name=\"${prom_container_id}\"}[1m]))*100)[${window_secs}s:15s]" \
         "$end_ts")"
     mem_bytes="$(prom_avg_over_window \
-        "(container_memory_usage_bytes{image=~\".*${PROM_CONTAINER_MATCH}.*\"})[${window_secs}s:15s]" \
+        "(container_memory_usage_bytes{name=\"${prom_container_id}\"})[${window_secs}s:15s]" \
         "$end_ts")"
 
     # Насыщение reports_pool — средняя занятость (не "idle") соединений
     # wallet_reader на wallet_api за окно (см. PG_TARGET_DB/PG_TARGET_USER
     # выше) — прямой сигнал по сценарию scenario_pool_saturation.js.
     pg_active_conns="$(prom_avg_over_window \
-        "(sum(pg_stat_activity_count{datname=\"${PG_TARGET_DB}\",usename=\"${PG_TARGET_USER}\",state=~\"active|idle in transaction\"}) or vector(0))[${window_secs}s:15s]" \
+        "(sum(pg_stat_activity_count{env=\"${LOADTEST_ENV}\",datname=\"${PG_TARGET_DB}\",usename=\"${PG_TARGET_USER}\",state=~\"active|idle in transaction\"}) or vector(0))[${window_secs}s:15s]" \
         "$end_ts")"
 
     # Buffer cache hit ratio, % — increase() по ДЕЛЬТЕ counters за окно
@@ -244,7 +228,7 @@ for clients in $CLIENT_LEVELS; do
     # prom_query_at), clamp_min на случай нулевого знаменателя (нет
     # обращений к БД за окно вовсе).
     pg_cache_hit_pct="$(prom_query_at \
-        "100 * sum(increase(pg_stat_database_blks_hit{datname=\"${PG_TARGET_DB}\"}[${window_secs}s])) / clamp_min(sum(increase(pg_stat_database_blks_hit{datname=\"${PG_TARGET_DB}\"}[${window_secs}s])) + sum(increase(pg_stat_database_blks_read{datname=\"${PG_TARGET_DB}\"}[${window_secs}s])), 1)" \
+        "100 * sum(increase(pg_stat_database_blks_hit{env=\"${LOADTEST_ENV}\",datname=\"${PG_TARGET_DB}\"}[${window_secs}s])) / clamp_min(sum(increase(pg_stat_database_blks_hit{env=\"${LOADTEST_ENV}\",datname=\"${PG_TARGET_DB}\"}[${window_secs}s])) + sum(increase(pg_stat_database_blks_read{env=\"${LOADTEST_ENV}\",datname=\"${PG_TARGET_DB}\"}[${window_secs}s])), 1)" \
         "$end_ts")"
 
     # Ожидающие (не granted) блокировки на целевой базе — custom-метрика
@@ -259,7 +243,7 @@ for clients in $CLIENT_LEVELS; do
     # этом стенде). sum() стягивает лейблы X в тот же пустой набор, что и у
     # vector(0), и тогда "or" действительно матчит.
     pg_lock_waits="$(prom_avg_over_window \
-        "(sum(locks_waiting_count{datname=\"${PG_TARGET_DB}\"}) or vector(0))[${window_secs}s:15s]" \
+        "(sum(locks_waiting_count{env=\"${LOADTEST_ENV}\",datname=\"${PG_TARGET_DB}\"}) or vector(0))[${window_secs}s:15s]" \
         "$end_ts")"
 
     echo "    requests=$requests rps=$rps p50=$p50 p90=$p90 p95=$p95 p99=$p99 err=$err cpu%=$cpu_pct mem=$mem_bytes pg_conns=$pg_active_conns pg_cache_hit%=$pg_cache_hit_pct pg_lock_waits=$pg_lock_waits"
