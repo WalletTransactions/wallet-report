@@ -1,6 +1,7 @@
 #include "reports_repo.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
@@ -463,10 +464,161 @@ BiggestMovesResult expense_biggest_moves(db::Database& db, const std::string& le
     return out;
 }
 
+namespace {
+
+constexpr std::size_t kMaxFilterUuids = 50;
+constexpr std::size_t kMaxQueryChars = 100;
+
+bool is_uuid_text(const std::string& s) {
+    if (s.size() != 36) return false;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Список uuid через запятую. Пустой элемент (в том числе хвостовая запятая)
+// — та же ошибка, что не-uuid; дубли допустимы.
+std::optional<std::string> parse_uuid_list(const std::string& name, const std::string& raw,
+                                           std::vector<std::string>& out) {
+    out.clear();
+    if (raw.empty()) return std::nullopt;
+    std::size_t pos = 0;
+    while (true) {
+        std::size_t comma = raw.find(',', pos);
+        std::string piece = raw.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (!is_uuid_text(piece)) return name + ": некорректный uuid";
+        out.push_back(piece);
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    if (out.size() > kMaxFilterUuids) return name + ": не больше 50 значений";
+    return std::nullopt;
+}
+
+// Число кодовых точек корректной UTF-8 строки; nullopt — строка не UTF-8
+// (битую строку Postgres отверг бы с 22021, то есть 500). Проверка строгая —
+// без overlong-форм и суррогатов, те же правила, что у Postgres.
+std::optional<std::size_t> utf8_length(const std::string& s) {
+    std::size_t count = 0;
+    std::size_t i = 0;
+    const std::size_t n = s.size();
+    while (i < n) {
+        auto b = static_cast<unsigned char>(s[i]);
+        std::size_t len;
+        unsigned char lo = 0x80, hi = 0xBF; // допустимый диапазон второго байта
+        if (b < 0x80) {
+            len = 1;
+        } else if (b >= 0xC2 && b <= 0xDF) {
+            len = 2;
+        } else if (b >= 0xE0 && b <= 0xEF) {
+            len = 3;
+            if (b == 0xE0) lo = 0xA0;
+            if (b == 0xED) hi = 0x9F;
+        } else if (b >= 0xF0 && b <= 0xF4) {
+            len = 4;
+            if (b == 0xF0) lo = 0x90;
+            if (b == 0xF4) hi = 0x8F;
+        } else {
+            return std::nullopt;
+        }
+        if (b == 0) return std::nullopt; // NUL в тексте Postgres не примет
+        if (i + len > n) return std::nullopt;
+        for (std::size_t k = 1; k < len; ++k) {
+            auto c = static_cast<unsigned char>(s[i + k]);
+            unsigned char min = k == 1 ? lo : 0x80;
+            unsigned char max = k == 1 ? hi : 0xBF;
+            if (c < min || c > max) return std::nullopt;
+        }
+        i += len;
+        ++count;
+    }
+    return count;
+}
+
+std::string uuid_array_literal(const std::vector<std::string>& uuids) {
+    std::string out = "{";
+    for (std::size_t i = 0; i < uuids.size(); ++i) {
+        if (i) out += ',';
+        out += uuids[i];
+    }
+    out += '}';
+    return out;
+}
+
+// Хвост вызова функции с фильтрами — именованной нотацией и ТОЛЬКО заданные
+// (design D1): непереданный параметр получает DEFAULT NULL в самой базе,
+// а db::Database::exec() SQL NULL передать не умеет. Значения идут
+// параметрами $n, из фиксированного набора имён собирается только текст.
+void append_filter_args(const OperationsFilter& filter, std::string& args, std::vector<std::string>& params) {
+    auto next = [&params]() { return "$" + std::to_string(params.size() + 1); };
+    if (!filter.category_uuids.empty()) {
+        args += ", p_category_uuids => " + next() + "::uuid[]";
+        params.push_back(uuid_array_literal(filter.category_uuids));
+    }
+    if (!filter.wallet_uuids.empty()) {
+        args += ", p_wallet_uuids => " + next() + "::uuid[]";
+        params.push_back(uuid_array_literal(filter.wallet_uuids));
+    }
+    if (!filter.kind.empty()) {
+        args += ", p_kind => " + next();
+        params.push_back(filter.kind);
+    }
+    if (!filter.q.empty()) {
+        args += ", p_q => " + next();
+        params.push_back(filter.q);
+    }
+}
+
+} // namespace
+
+std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                    const std::string& wallet_uuid,
+                                                    const std::string& kind, const std::string& q,
+                                                    OperationsFilter& out) {
+    out = OperationsFilter{};
+    if (auto err = parse_uuid_list("category_uuid", category_uuid, out.category_uuids)) return err;
+    if (auto err = parse_uuid_list("wallet_uuid", wallet_uuid, out.wallet_uuids)) return err;
+    if (!kind.empty() && kind != "expense" && kind != "income" && kind != "transfer") {
+        return std::string("kind должен быть expense, income или transfer");
+    }
+    out.kind = kind;
+    if (!q.empty()) {
+        auto len = utf8_length(q);
+        if (!len || *len > kMaxQueryChars) return std::string("q: не длиннее 100 символов");
+    }
+    out.q = q;
+    return std::nullopt;
+}
+
+OperationsTotal operations_total(db::Database& db, const std::string& ledger_id, const std::string& from,
+                                 const std::string& to, const std::string& eq_currency_uuid,
+                                 const OperationsFilter& filter) {
+    std::vector<std::string> params = {ledger_id, from, to, eq_currency_uuid};
+    std::string args = "$1, $2, $3, $4";
+    append_filter_args(filter, args, params);
+    auto result = db.exec("SELECT total_eq, incomplete, matched FROM f_operations_total(" + args + ")", params);
+
+    OperationsTotal out;
+    if (!result.rows.empty()) { // функция отдаёт ровно одну строку; пусто — защитно
+        const auto& f = result.rows[0].fields;
+        out.total_eq = f.at(0).empty() ? "0" : f.at(0);
+        out.incomplete = f.at(1) == "t";
+        out.matched = std::stoll(f.at(2));
+    }
+    return out;
+}
+
 OperationsResult operations_for_period(db::Database& db, const std::string& ledger_id,
                                         const std::string& from, const std::string& to,
                                         const std::string& eq_currency_uuid, int limit,
-                                        const std::string& cursor_date, const std::string& cursor_uuid) {
+                                        const std::string& cursor_date, const std::string& cursor_uuid,
+                                        const OperationsFilter& filter) {
     static const char* kSelectColumns =
         "operation_uuid, \"date\", kind, amount, currency_uuid, symbol, \"precision\", "
         "amount_eq, comment, category_uuid, category_name, icon_sha256, wallet_uuid, wallet_name, "
@@ -487,22 +639,27 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
     // строк и были последними в периоде.
     std::string fetch_limit = std::to_string(limit + 1);
 
-    db::Result result;
-    if (cursor_date.empty()) {
-        // Первая страница — БЕЗ $6/$7 вовсе (не NULL-параметрами): Postgres
-        // сам подставит DEFAULT NULL у p_cursor_date/p_cursor_uuid (см.
-        // f_operations_for_period.sql) — db::Database::exec() пока не умеет
-        // посылать настоящий SQL NULL через $N (все параметры — непустые
-        // строки, см. db.hpp), тот же приём, что и у resolve_eq_currency с
-        // пустым ledger_id (см. её комментарий в reports_repo.hpp).
-        result = db.exec(std::string("SELECT ") + kSelectColumns +
-                              " FROM f_operations_for_period($1, $2, $3, $4, $5)",
-                          {ledger_id, from, to, eq_currency_uuid, fetch_limit});
-    } else {
-        result = db.exec(std::string("SELECT ") + kSelectColumns +
-                              " FROM f_operations_for_period($1, $2, $3, $4, $5, $6, $7)",
-                          {ledger_id, from, to, eq_currency_uuid, fetch_limit, cursor_date, cursor_uuid});
+    // Первая страница — БЕЗ $6/$7 вовсе (не NULL-параметрами): Postgres
+    // сам подставит DEFAULT NULL у p_cursor_date/p_cursor_uuid (см.
+    // f_operations_for_period.sql) — db::Database::exec() пока не умеет
+    // посылать настоящий SQL NULL через $N (все параметры — непустые
+    // строки, см. db.hpp), тот же приём, что и у resolve_eq_currency с
+    // пустым ledger_id (см. её комментарий в reports_repo.hpp).
+    //
+    // Курсор остаётся позиционным ($6, $7), фильтры — именованными после него
+    // (append_filter_args). Так без фильтров текст вызова тот же, что до
+    // миграции wallet-api 000027, и лента работает и на старой сигнатуре
+    // функции (design, Risks).
+    std::vector<std::string> params = {ledger_id, from, to, eq_currency_uuid, fetch_limit};
+    std::string args = "$1, $2, $3, $4, $5";
+    if (!cursor_date.empty()) {
+        args += ", $6, $7";
+        params.push_back(cursor_date);
+        params.push_back(cursor_uuid);
     }
+    append_filter_args(filter, args, params);
+    db::Result result =
+        db.exec(std::string("SELECT ") + kSelectColumns + " FROM f_operations_for_period(" + args + ")", params);
 
     OperationsResult out;
     std::size_t take = result.rows.size();
@@ -520,6 +677,17 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
     for (std::size_t i = 0; i < take; ++i) {
         out.rows.push_back(row_to_json(result.rows[i].fields, kColumns));
         if (result.rows[i].fields.at(kAmountEqIdx).empty()) out.incomplete = true;
+    }
+
+    // Итог — вторым запросом и только при фильтрах (design D3): окно
+    // sum() OVER () посчитало бы лишь строки до LIMIT, а нужен весь период.
+    // Без фильтров запроса нет, и ответ прежний.
+    if (filter.any()) {
+        auto total = operations_total(db, ledger_id, from, to, eq_currency_uuid, filter);
+        out.has_total = true;
+        out.total_eq = total.total_eq;
+        out.total_incomplete = total.incomplete;
+        out.total_count = total.matched;
     }
     return out;
 }

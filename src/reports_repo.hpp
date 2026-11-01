@@ -219,11 +219,11 @@ BiggestMovesResult expense_biggest_moves(db::Database& db, const std::string& le
 
 // "Список операций" (Design/.../Отчёты - веб (офлайн).html, вид 'ops',
 // GET /api/reports/operations) — страница операций периода, сортировка по
-// дате убыв. Обёртка над f_operations_for_period; в отличие от остальных
-// отчётов здесь нет ни поиска, ни фильтра по типу/категории/кошельку на
-// стороне сервиса — вызывающий (веб-клиент) делает это сам над уже
-// загруженными страницами, тем же приёмом, что и design-прототип (см.
-// .sql-функцию).
+// дате убыв. Обёртка над f_operations_for_period. Необязательные фильтры
+// (OperationsFilter ниже, change add-operations-filters) применяются в самой
+// SQL-функции ДО курсора и LIMIT — поэтому has_more/курсор относятся к
+// отфильтрованному набору. Веб и бот пока фильтруют загруженные страницы
+// сами; серверные фильтры нужны wallet-mcp (search_operations).
 //
 // Курсорная пагинация — по прямому запросу (2026-09-12, "давай улучшим
 // операции... по умолчанию 1000, если выбираем 20 лет — не тащить всё"):
@@ -257,7 +257,54 @@ struct OperationsResult {
     bool has_more = false;
     std::string next_cursor_date;
     std::string next_cursor_uuid;
+    // Итог по фильтру — только если задан хоть один фильтр (has_total). По
+    // ВСЕМ подходящим операциям периода, без курсора и лимита (см.
+    // operations_total). total_eq — numeric из базы текстом как есть.
+    bool has_total = false;
+    std::string total_eq = "0";
+    bool total_incomplete = false;
+    long long total_count = 0;
 };
+
+// Фильтры ленты (change add-operations-filters). Пустой вектор/строка —
+// фильтр НЕ задан (в SQL параметр не передаётся вовсе и получает DEFAULT
+// NULL). Пустого списка «ни одной категории» отсюда не бывает: пустое
+// значение query-параметра равносильно его отсутствию. uuid в списках
+// обязаны быть уже проверены (parse_operations_filter): из них собирается
+// литерал массива '{a,b}', и битый uuid дал бы ошибку Postgres (500), а не 400.
+struct OperationsFilter {
+    std::vector<std::string> category_uuids; // ИЛИ внутри списка; только неоперационная сторона
+    std::vector<std::string> wallet_uuids;   // ИЛИ; операционная сторона, прямой перевод — по любому из двух
+    std::string kind;                        // "", "expense", "income", "transfer"
+    std::string q;                           // подстрока комментария, без регистра, ё = е, буквально
+
+    bool any() const {
+        return !category_uuids.empty() || !wallet_uuids.empty() || !kind.empty() || !q.empty();
+    }
+};
+
+// Разбор и проверка query-параметров фильтра — чистая функция без базы и
+// httplib (её зовут handle_operations и интеграционные тесты). Возвращает
+// текст ошибки для 400 или nullopt, если всё в порядке (тогда out заполнен).
+// Тексты — дословно из spec «Проверка параметров фильтра»; порядок проверок:
+// category_uuid → wallet_uuid → kind → q.
+std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                    const std::string& wallet_uuid,
+                                                    const std::string& kind, const std::string& q,
+                                                    OperationsFilter& out);
+
+struct OperationsTotal {
+    std::string total_eq = "0"; // с kind — неотрицательная сумма, без — доходы минус расходы
+    bool incomplete = false;    // у части подходящих операций нет курса — в сумму они не вошли
+    long long matched = 0;      // число подходящих операций (прямые переводы тоже)
+};
+
+// Итог по фильтру за весь период — f_operations_total, ровно одна строка.
+// Те же условия, что у f_operations_for_period (согласованность — тест
+// operations_total_matches_all_pages).
+OperationsTotal operations_total(db::Database& db, const std::string& ledger_id, const std::string& from,
+                                 const std::string& to, const std::string& eq_currency_uuid,
+                                 const OperationsFilter& filter);
 
 // limit — сколько строк отдать максимум (вызывающий, reports.cpp, обязан
 // проверить диапазон ДО вызова — здесь не проверяется, как и валидность
@@ -265,10 +312,16 @@ struct OperationsResult {
 // страница" (вызов без $6/$7 — см. .cpp, почему не NULL-параметр); заданы
 // ОБА или НИ ОДНОГО — как cmp_from/cmp_to у expense_structure_for_period,
 // вызывающий обязан отклонить смешанный случай ДО вызова.
+//
+// filter — необязательные фильтры (см. OperationsFilter). Если задан хоть
+// один, на том же соединении вторым запросом считается итог
+// (operations_total) и result.has_total = true; без фильтров второго
+// запроса нет и текст вызова тот же, что до фильтров.
 OperationsResult operations_for_period(db::Database& db, const std::string& ledger_id,
                                         const std::string& from, const std::string& to,
                                         const std::string& eq_currency_uuid, int limit,
-                                        const std::string& cursor_date, const std::string& cursor_uuid);
+                                        const std::string& cursor_date, const std::string& cursor_uuid,
+                                        const OperationsFilter& filter = {});
 
 // "Кошельки и остатки" (Design/.../Отчёты - веб (офлайн).html, вид 'wal',
 // GET /api/reports/wallet-turnover) — обёртка над f_wallet_turnover_for_period:
