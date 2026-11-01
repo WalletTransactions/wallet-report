@@ -441,6 +441,7 @@ loadtest/
     scenario_smoke.js
     scenario_dashboard_burst.js
     scenario_pool_saturation.js — параметризован по VUS, используется record_run.sh для sweep
+    scenario_operations_filters.js — лента за год без фильтров / с q / с category_uuid (теги endpoint), критерий p95 ≤ 2× ленты без фильтров
 
 ../../infra/db/migrations/perf/         — миграция test_run/test_result + роль perf_reader (000001) +
                                            target_rate_max/dropped_iterations под find_the_wall (000002) +
