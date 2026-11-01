@@ -78,7 +78,7 @@ Postgres отклонит любую попытку `INSERT`/`UPDATE`/`DELETE` �
 | `GET /api/reports/expense-by-weekday` | Расход по дню недели — экран "Обзор" |
 | `GET /api/reports/expense-biggest-moves` | Категории с наибольшим изменением расхода между двумя периодами — экран "Обзор" |
 | `GET /api/reports/operations` | Все операции периода плоским списком — экран "Список операций" |
-| `GET /api/reports/currencies` | Справочник валют — для выпадающего списка "Валюта эквивалента" |
+| `GET /api/reports/currencies` | Справочник валют — для выпадающего списка "Валюта эквивалента" и списка валют; у элемента `show_in_equivalent`, `is_own` (boolean), `icon_uuid`, `precision` (число) |
 | `GET /api/reports/accounts` | Все живые кошельки и категории леджера (`kind`, `include_archived`) — для Telegram-бота |
 | `GET /api/reports/icons` | Иконки, доступные леджеру: общий набор (`common`) и свои (`user`) — вкладка "Иконки" |
 

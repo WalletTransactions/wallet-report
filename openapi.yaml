@@ -583,6 +583,11 @@ paths:
         валютой и своей этого леджера в списке только ОДНА строка — своя (тот
         же приоритет, что при резолве `eq_currency` на остальных отчётах).
 
+        Каждый элемент несёт `show_in_equivalent` и `is_own` (boolean), а также
+        `icon_uuid` и числовой `precision` для формы правки валюты. Валюты со
+        снятым `show_in_equivalent` в списке остаются — пикер эквивалента
+        фильтрует их на клиенте.
+
         Список не зависит от периода — без `from`/`to`; без `eq_currency` —
         сам этот отчёт СУЩЕСТВУЕТ для того, чтобы им заполнить eq_currency,
         а не наоборот.
@@ -699,7 +704,7 @@ paths:
               required: [user_ids]
       responses:
         "400":
-          description: Тело не `{"user_ids": [...]}`, элемент не UUID или больше 5000 id
+          description: 'Тело не `{"user_ids": [...]}`, элемент не UUID или больше 5000 id'
           content:
             application/json: {schema: {$ref: "#/components/schemas/Error"}}
         "401":
@@ -1063,7 +1068,11 @@ components:
         name: {type: string, description: "Название валюты, видимое пользователю."}
         symbol: {type: string, description: "Символ валюты для вывода сумм (например, \"$\")."}
         icon_sha256: {type: string, description: "content_sha256 иконки-флага валюты, hex. Картинку веб-клиент качает сам через GET /sync/blobs/:sha256 (wallet-api), см. ExpenseStructureRow.icon_sha256 про сам механизм."}
-      required: [uuid, iso_code, name, symbol, icon_sha256]
+        show_in_equivalent: {type: boolean, description: "Показывать ли валюту в выборе валюты эквивалента (currency.show_in_equivalent). Валюты с false из списка не убираются — фильтрует клиент, тот же справочник целиком нужен пикерам валютных пар. Флаг относится к выбору в интерфейсе: отчёт с такой eq_currency по-прежнему считается."}
+        is_own: {type: boolean, description: "true — своя валюта леджера (ledger_id заполнен), false — общая. Без леджера все false."}
+        icon_uuid: {type: string, format: uuid, description: "uuid иконки-флага (currency.icon_uuid) — текущее значение для формы правки валюты."}
+        precision: {type: integer, minimum: 0, maximum: 8, description: "Число знаков в суммах этой валюты — JSON-число (не строка, в отличие от precision в остальных отчётах)."}
+      required: [uuid, iso_code, name, symbol, icon_sha256, show_in_equivalent, is_own, icon_uuid, precision]
 
     IconsReport:
       type: object
