@@ -10,6 +10,11 @@
 // CMakeLists.txt рядом) — сам сервис wallet_report их не содержит вовсе.
 #include "reports_repo.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
 #include "fixture.hpp"
 #include "nlohmann/json.hpp"
 #include "sync_repo.hpp"
@@ -938,6 +943,454 @@ TEST(operations_for_period_incomplete_is_scoped_to_the_page) {
     CHECK(!page2.incomplete); // priced — курс есть
 }
 
+// ---------------------------------------------------------------------------
+// Фильтры ленты и итог (change add-operations-filters, wallet-api 000027).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+json operation_with_comment(const std::string& uuid, const std::string& date, const std::string& from_uuid,
+                            const std::string& to_uuid, const std::string& amount, const std::string& comment) {
+    json row = operation_row(uuid, date, from_uuid, to_uuid, amount);
+    row["comment"] = comment;
+    return row;
+}
+
+// Один леджер на все тесты фильтров: два кошелька в валюте эквивалента, один
+// в валюте без курса, пять категорий. Суммы — целые, чтобы сравнение итогов
+// не зависело от формата numeric.
+struct FilterLedger {
+    fixture::TestIdentity identity;
+    std::string eq_currency;
+    std::string w_tinkoff, w_cash, w_unpriced;
+    std::string k_taxi, k_nanny, k_cafe, k_food, k_salary, k_misc;
+    std::string e1, e2, e3, e4, e5, e6, e7, i1, t1, u1;
+    static constexpr const char* kFrom = "2026-05-01T00:00:00";
+    static constexpr const char* kTo = "2026-05-31T23:59:59";
+};
+
+FilterLedger seed_filter_ledger(db::Database& db, db::Database& reports_db) {
+    FilterLedger l;
+    l.identity = fixture::make_identity(db);
+    std::string icon_uuid = fixture::make_reference_icon(db);
+    std::string cur = uuidgen::v4();
+    std::string cur_no_rate = uuidgen::v4();
+    std::string iso = "FL" + uuidgen::v4().substr(0, 6);
+    std::string iso_no_rate = "FN" + uuidgen::v4().substr(0, 6);
+    for (auto* s : {&l.w_tinkoff, &l.w_cash, &l.w_unpriced, &l.k_taxi, &l.k_nanny, &l.k_cafe, &l.k_food,
+                    &l.k_salary, &l.k_misc, &l.e1, &l.e2, &l.e3, &l.e4, &l.e5, &l.e6, &l.e7, &l.i1, &l.t1,
+                    &l.u1}) {
+        *s = uuidgen::v4();
+    }
+
+    json changes = {
+        {"currency", json::array({currency_row(cur, icon_uuid, iso), currency_row(cur_no_rate, icon_uuid, iso_no_rate)})},
+        {"account", json::array({
+             account_row(l.w_tinkoff, icon_uuid, "Тинькофф"), account_row(l.w_cash, icon_uuid, "Наличные"),
+             account_row(l.w_unpriced, icon_uuid, "Без курса"), account_row(l.k_taxi, icon_uuid, "Такси"),
+             account_row(l.k_nanny, icon_uuid, "Няня"), account_row(l.k_cafe, icon_uuid, "Кафе"),
+             account_row(l.k_food, icon_uuid, "Продукты"), account_row(l.k_salary, icon_uuid, "Зарплата"),
+             account_row(l.k_misc, icon_uuid, "Разное"),
+         })},
+        {"account_operating", json::array({account_operating_row(l.w_tinkoff, cur),
+                                            account_operating_row(l.w_cash, cur),
+                                            account_operating_row(l.w_unpriced, cur_no_rate)})},
+        {"operation", json::array({
+             operation_with_comment(l.e1, "2026-05-01T10:00:00", l.w_tinkoff, l.k_taxi, "450.00", "Такси домой"),
+             operation_with_comment(l.e2, "2026-05-02T10:00:00", l.w_cash, l.k_taxi, "300.00", "такси в аэропорт"),
+             operation_with_comment(l.e3, "2026-05-03T10:00:00", l.w_tinkoff, l.k_cafe, "120.00", "Кофе 100% арабика"),
+             operation_with_comment(l.e4, "2026-05-04T10:00:00", l.w_cash, l.k_cafe, "80.00", "кафе 100 рублей"),
+             operation_with_comment(l.e5, "2026-05-05T10:00:00", l.w_tinkoff, l.k_nanny, "5000.00", "Няня за неделю"),
+             operation_with_comment(l.i1, "2026-05-06T10:00:00", l.k_salary, l.w_tinkoff, "1000.00", "Зарплата"),
+             operation_with_comment(l.t1, "2026-05-07T10:00:00", l.w_cash, l.w_tinkoff, "200.00", "перевод на карту"),
+             operation_with_comment(l.e6, "2026-05-08T10:00:00", l.w_cash, l.k_food, "70.00", "новогодняя елка"),
+             operation_with_comment(l.e7, "2026-05-09T10:00:00", l.w_tinkoff, l.k_food, "50.00", ""),
+             operation_with_comment(l.u1, "2026-05-10T10:00:00", l.w_unpriced, l.k_misc, "10.00", "такси без курса"),
+         })},
+    };
+    auto push = sync_repo::push_batch(db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+
+    auto eq = reports_repo::resolve_eq_currency(reports_db, iso, l.identity.ledger_id);
+    REQUIRE(eq.has_value());
+    l.eq_currency = *eq;
+    return l;
+}
+
+// Все страницы ленты с фильтром (limit маленький) — uuid по порядку обхода.
+std::vector<json> all_filtered_rows(db::Database& reports_db, const FilterLedger& l,
+                                    const reports_repo::OperationsFilter& filter, int limit) {
+    std::vector<json> rows;
+    std::string cursor_date, cursor_uuid;
+    for (int guard = 0; guard < 10000; ++guard) {
+        auto page = reports_repo::operations_for_period(reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                         FilterLedger::kTo, l.eq_currency, limit, cursor_date,
+                                                         cursor_uuid, filter);
+        for (const auto& r : page.rows) rows.push_back(r);
+        if (!page.has_more) break;
+        cursor_date = page.next_cursor_date;
+        cursor_uuid = page.next_cursor_uuid;
+    }
+    return rows;
+}
+
+std::vector<std::string> sorted_uuids(const std::vector<json>& rows) {
+    std::vector<std::string> out;
+    for (const auto& r : rows) out.push_back(r.at("operation_uuid").get<std::string>());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> sorted(std::vector<std::string> v) {
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+std::vector<std::string> filtered_uuids(db::Database& reports_db, const FilterLedger& l,
+                                        const reports_repo::OperationsFilter& filter) {
+    return sorted_uuids(all_filtered_rows(reports_db, l, filter, 1000));
+}
+
+double as_number(const std::string& s) { return std::stod(s); }
+
+} // namespace
+
+// Каждый фильтр отдельно, списки по ИЛИ, фильтры по И.
+TEST(operations_filter_each_filter_and_combinations) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.category_uuids = {l.k_taxi};
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e2}));
+
+    f = {};
+    f.category_uuids = {l.k_taxi, l.k_nanny}; // ИЛИ внутри списка
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e2, l.e5}));
+
+    f = {};
+    f.wallet_uuids = {l.w_cash}; // перевод с «Наличных» — по кошельку-отправителю
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e2, l.e4, l.t1, l.e6}));
+
+    f = {};
+    f.kind = "income";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.i1}));
+    f.kind = "transfer";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.t1}));
+    f.kind = "expense";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e2, l.e3, l.e4, l.e5, l.e6, l.e7, l.u1}));
+
+    f = {};
+    f.category_uuids = {l.k_cafe};
+    f.wallet_uuids = {l.w_tinkoff}; // И: «Кафе» и «Тинькофф»
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e3}));
+
+    f = {};
+    f.q = "такси";
+    f.kind = "expense";
+    f.wallet_uuids = {l.w_cash};
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e2}));
+}
+
+// Прямой перевод находится по любому из двух кошельков; uuid категории среди
+// кошельков (и наоборот) ничего не находит; категория под фильтр перевода не тянет.
+TEST(operations_filter_wallet_side_and_cross_kind_uuids) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.wallet_uuids = {l.w_tinkoff}; // перевод «Наличные» → «Тинькофф» — по получателю
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e3, l.e5, l.i1, l.t1, l.e7}));
+
+    f = {};
+    f.wallet_uuids = {l.k_taxi};
+    auto r = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                  FilterLedger::kTo, l.eq_currency, 1000, "", "", f);
+    CHECK(r.rows.empty());
+    CHECK(r.has_total);
+    CHECK_EQ(r.total_count, 0LL);
+
+    f = {};
+    f.category_uuids = {l.w_tinkoff, l.w_cash}; // uuid кошельков в фильтре категорий
+    CHECK(filtered_uuids(*reports_db, l, f).empty());
+}
+
+// uuid категории другого леджера — 200 с пустым списком, чужие операции не видны.
+TEST(operations_filter_foreign_ledger_uuid_finds_nothing) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto mine = seed_filter_ledger(*db, *reports_db);
+    auto other = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.category_uuids = {other.k_taxi};
+    auto r = reports_repo::operations_for_period(*reports_db, mine.identity.ledger_id, FilterLedger::kFrom,
+                                                  FilterLedger::kTo, mine.eq_currency, 1000, "", "", f);
+    CHECK(r.rows.empty());
+    CHECK(r.has_total);
+    CHECK_EQ(r.total_count, 0LL);
+    CHECK_EQ(as_number(r.total_eq), 0.0);
+    CHECK(!r.total_incomplete);
+}
+
+// q: без учёта регистра, ё = е, % и _ — буквально, пустой комментарий не совпадает.
+TEST(operations_filter_q_case_yo_and_literal_wildcards) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.q = "ЁЛКА"; // комментарий «новогодняя елка»
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e6}));
+
+    f.q = "ТАКСИ";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e2, l.u1}));
+
+    f.q = "100%"; // «кафе 100 рублей» не подходит
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e3}));
+
+    f.q = "1_0"; // как LIKE совпало бы со «100», буквально — ни с чем
+    CHECK(filtered_uuids(*reports_db, l, f).empty());
+
+    f.q = "%";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e3}));
+
+    // Пустой комментарий (e7) не находится ни по какой подстроке.
+    f.q = " ";
+    auto rows = filtered_uuids(*reports_db, l, f);
+    CHECK(std::find(rows.begin(), rows.end(), l.e7) == rows.end());
+}
+
+// Пагинация по отфильтрованному набору: 3000 операций, 5 подходящих, limit 2 —
+// страницы 2, 2, 1, у последней has_more: false, каждая ровно один раз.
+// Две подходящие — с одной датой (порядок по (date, uuid)).
+TEST(operations_filter_pages_without_gaps_or_duplicates) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+
+    FilterLedger l;
+    l.identity = fixture::make_identity(*db);
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string cur = uuidgen::v4();
+    std::string iso = "FP" + uuidgen::v4().substr(0, 6);
+    std::string wallet = uuidgen::v4();
+    std::string category = uuidgen::v4();
+
+    std::vector<std::string> expected;
+    json ops = json::array();
+    for (int i = 0; i < 3000; ++i) {
+        int minutes = (i == 501 ? 500 : i) * 10; // 500 и 501 — одна и та же дата
+        char date[32];
+        std::snprintf(date, sizeof(date), "2026-05-%02dT%02d:%02d:00", 1 + minutes / 1440, (minutes % 1440) / 60,
+                      minutes % 60);
+        bool match = i == 7 || i == 500 || i == 501 || i == 1700 || i == 2999;
+        std::string uuid = uuidgen::v4();
+        if (match) expected.push_back(uuid);
+        ops.push_back(operation_with_comment(uuid, date, wallet, category, "1.00",
+                                             match ? "Редкое совпадение" : "обычная трата"));
+    }
+    json changes = {
+        {"currency", json::array({currency_row(cur, icon_uuid, iso)})},
+        {"account", json::array({account_row(wallet, icon_uuid, "Кошелёк"), account_row(category, icon_uuid, "Категория")})},
+        {"account_operating", json::array({account_operating_row(wallet, cur)})},
+        {"operation", ops},
+    };
+    auto push = sync_repo::push_batch(*db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+    auto eq = reports_repo::resolve_eq_currency(*reports_db, iso, l.identity.ledger_id);
+    REQUIRE(eq.has_value());
+    l.eq_currency = *eq;
+
+    reports_repo::OperationsFilter f;
+    f.q = "редкое";
+    f.kind = "expense";
+
+    std::vector<std::size_t> page_sizes;
+    std::vector<json> rows;
+    std::string cursor_date, cursor_uuid;
+    bool last_has_more = true;
+    for (int guard = 0; guard < 10 && last_has_more; ++guard) {
+        auto page = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                         FilterLedger::kTo, l.eq_currency, 2, cursor_date,
+                                                         cursor_uuid, f);
+        page_sizes.push_back(page.rows.size());
+        for (const auto& r : page.rows) rows.push_back(r);
+        CHECK_EQ(page.total_count, 5LL); // итог — по всем страницам, на каждой
+        last_has_more = page.has_more;
+        cursor_date = page.next_cursor_date;
+        cursor_uuid = page.next_cursor_uuid;
+    }
+    CHECK(page_sizes == (std::vector<std::size_t>{2, 2, 1}));
+    CHECK(!last_has_more);
+    CHECK(sorted_uuids(rows) == sorted(expected));
+}
+
+// Итог по фильтру: за весь период при limit меньше числа совпадений; с kind —
+// неотрицательная сумма; без kind — сальдо, прямой перевод даёт 0, но входит в
+// total_count; операция без курса — incomplete и не в сумме; нет совпадений — 0/false/0.
+TEST(operations_total_sign_rule_incomplete_and_whole_period) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    auto page = [&](const reports_repo::OperationsFilter& f, int limit) {
+        return reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                    FilterLedger::kTo, l.eq_currency, limit, "", "", f);
+    };
+
+    // Такси, только расходы: 450 + 300, страница из одной строки.
+    reports_repo::OperationsFilter f;
+    f.category_uuids = {l.k_taxi};
+    f.kind = "expense";
+    auto r = page(f, 1);
+    CHECK_EQ(r.rows.size(), static_cast<size_t>(1));
+    CHECK(r.has_more);
+    CHECK(r.has_total);
+    CHECK_EQ(as_number(r.total_eq), 750.0);
+    CHECK_EQ(r.total_count, 2LL);
+    CHECK(!r.total_incomplete);
+
+    // Сальдо «Тинькофф»: доход 1000 − расходы (450 + 120 + 5000 + 50), перевод 200 — 0, но в счёте.
+    f = {};
+    f.wallet_uuids = {l.w_tinkoff};
+    r = page(f, 2);
+    CHECK_EQ(as_number(r.total_eq), -4620.0);
+    CHECK_EQ(r.total_count, 6LL);
+
+    // Сальдо в минус: только расходы на няню.
+    f = {};
+    f.q = "няня";
+    r = page(f, 1000);
+    CHECK_EQ(as_number(r.total_eq), -5000.0);
+    CHECK_EQ(r.total_count, 1LL);
+
+    // kind=transfer — неотрицательная сумма переводов.
+    f = {};
+    f.kind = "transfer";
+    r = page(f, 1000);
+    CHECK_EQ(as_number(r.total_eq), 200.0);
+    CHECK_EQ(r.total_count, 1LL);
+
+    // Операция без курса: в счёте, не в сумме, incomplete на всех страницах.
+    f = {};
+    f.category_uuids = {l.k_taxi, l.k_misc};
+    r = page(f, 1); // первая страница — u1 (самая свежая), без курса
+    CHECK_EQ(as_number(r.total_eq), -750.0);
+    CHECK_EQ(r.total_count, 3LL);
+    CHECK(r.total_incomplete);
+    auto r2 = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                   FilterLedger::kTo, l.eq_currency, 1, r.next_cursor_date,
+                                                   r.next_cursor_uuid, f);
+    CHECK(!r2.incomplete); // страница с курсом
+    CHECK(r2.total_incomplete);  // итог — по всему периоду
+
+    // Ничего не подошло.
+    f = {};
+    f.q = "нет такого комментария";
+    r = page(f, 1000);
+    CHECK(r.rows.empty());
+    CHECK(r.has_total);
+    CHECK_EQ(as_number(r.total_eq), 0.0);
+    CHECK(!r.total_incomplete);
+    CHECK_EQ(r.total_count, 0LL);
+
+    // Без фильтров итога нет.
+    r = page(reports_repo::OperationsFilter{}, 1000);
+    CHECK(!r.has_total);
+    CHECK_EQ(r.rows.size(), static_cast<size_t>(10));
+}
+
+// Согласованность двух SQL-функций: matched = число строк по всем страницам,
+// total_eq = их сумма по правилу знака, incomplete = есть строка без amount_eq.
+TEST(operations_total_matches_all_pages) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    std::vector<reports_repo::OperationsFilter> filters(7);
+    filters[0].wallet_uuids = {l.w_cash};
+    filters[1].wallet_uuids = {l.w_tinkoff, l.w_unpriced};
+    filters[2].kind = "expense";
+    filters[3].q = "такси";
+    filters[4].category_uuids = {l.k_cafe, l.k_food, l.k_misc};
+    filters[5].category_uuids = {l.k_salary};
+    filters[5].wallet_uuids = {l.w_tinkoff};
+    filters[6].kind = "income";
+    filters[6].q = "а";
+
+    for (const auto& f : filters) {
+        auto rows = all_filtered_rows(*reports_db, l, f, 2);
+        double sum = 0.0;
+        bool incomplete = false;
+        for (const auto& row : rows) {
+            std::string amount_eq = row.at("amount_eq").get<std::string>();
+            if (amount_eq.empty()) {
+                incomplete = true;
+                continue;
+            }
+            double v = as_number(amount_eq);
+            std::string kind = row.at("kind").get<std::string>();
+            if (!f.kind.empty()) sum += v;
+            else if (kind == "income") sum += v;
+            else if (kind == "expense") sum -= v;
+        }
+        auto total = reports_repo::operations_total(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                    FilterLedger::kTo, l.eq_currency, f);
+        CHECK_EQ(total.matched, static_cast<long long>(rows.size()));
+        CHECK(std::abs(as_number(total.total_eq) - sum) < 1e-9);
+        CHECK_EQ(total.incomplete, incomplete);
+    }
+}
+
+// Проверка ввода (spec «Проверка параметров фильтра») — чистая функция, без базы:
+// тексты 400 дословно. Через HTTP её зовёт handle_operations.
+TEST(operations_filter_parse_rejects_bad_input_with_exact_texts) {
+    reports_repo::OperationsFilter f;
+    std::string u = uuidgen::v4();
+
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", f).has_value());
+    CHECK(!f.any()); // пустые значения — фильтров нет
+
+    CHECK_EQ(reports_repo::parse_operations_filter("", "abc", "", "", f).value_or(""),
+             std::string("wallet_uuid: некорректный uuid"));
+    CHECK_EQ(reports_repo::parse_operations_filter(u + ",", "", "", "", f).value_or(""),
+             std::string("category_uuid: некорректный uuid"));
+    CHECK_EQ(reports_repo::parse_operations_filter("," + u, "", "", "", f).value_or(""),
+             std::string("category_uuid: некорректный uuid"));
+
+    std::string fifty = u, fifty_one;
+    for (int i = 1; i < 50; ++i) fifty += "," + u; // дубли допустимы
+    fifty_one = fifty + "," + u;
+    CHECK(!reports_repo::parse_operations_filter(fifty, "", "", "", f).has_value());
+    CHECK_EQ(f.category_uuids.size(), static_cast<size_t>(50));
+    CHECK_EQ(reports_repo::parse_operations_filter("", fifty_one, "", "", f).value_or(""),
+             std::string("wallet_uuid: не больше 50 значений"));
+    CHECK_EQ(reports_repo::parse_operations_filter(fifty_one, "", "", "", f).value_or(""),
+             std::string("category_uuid: не больше 50 значений"));
+
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "Expense", "", f).value_or(""),
+             std::string("kind должен быть expense, income или transfer"));
+    for (const char* k : {"expense", "income", "transfer"}) {
+        CHECK(!reports_repo::parse_operations_filter("", "", k, "", f).has_value());
+    }
+
+    std::string cyr100;
+    for (int i = 0; i < 100; ++i) cyr100 += "ж"; // 200 байт UTF-8
+    CHECK(!reports_repo::parse_operations_filter("", "", "", cyr100, f).has_value());
+    CHECK_EQ(f.q, cyr100);
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", cyr100 + "ж", f).value_or(""),
+             std::string("q: не длиннее 100 символов"));
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", std::string("\xD0", 1), f).value_or(""),
+             std::string("q: не длиннее 100 символов")); // битый UTF-8 — тот же текст
+
+    CHECK(!reports_repo::parse_operations_filter(u, u, "income", "такси", f).has_value());
+    CHECK(f.any());
+    CHECK_EQ(f.category_uuids.size(), static_cast<size_t>(1));
+    CHECK_EQ(f.wallet_uuids.size(), static_cast<size_t>(1));
+}
+
 // "Кошельки и остатки" — три кошелька: один тронут только КАТЕГОРИЙНОЙ
 // операцией (расход), один тронут только ПЕРЕВОДОМ кошелёк -> кошелёк (сюда
 // f_income_for_period/f_expanse_for_period вообще не заглянули бы — прямая
@@ -1627,9 +2080,113 @@ TEST(list_currencies_includes_ledger_currency) {
         CHECK_EQ(row.at("name").get<std::string>(), iso);   // currency_row() выше кладёт iso и в name, и в symbol
         CHECK_EQ(row.at("symbol").get<std::string>(), iso);
         CHECK_EQ(row.at("icon_sha256").get<std::string>(), icon.sha256_hex); // "флаг страны" в выпадающем списке, по прямому запросу
+        // currency-ui-tweaks: своя валюта леджера, флаг по умолчанию (DEFAULT true).
+        CHECK(row.at("is_own").is_boolean());
+        CHECK(row.at("is_own").get<bool>());
+        CHECK(row.at("show_in_equivalent").is_boolean());
+        CHECK(row.at("show_in_equivalent").get<bool>());
         found = true;
     }
     CHECK(found);
+}
+
+// currency-ui-tweaks, «Поля для формы правки»: icon_uuid — uuid иконки, а не
+// только её sha256; precision — JSON-число. Точность 3, не 2: значение по
+// умолчанию колонки не должно случайно совпасть с ожидаемым.
+TEST(list_currencies_returns_icon_uuid_and_numeric_precision) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string currency_uuid = uuidgen::v4();
+    std::string iso = "KZ" + uuidgen::v4().substr(0, 6);
+    json cur = currency_row(currency_uuid, icon_uuid, iso);
+    cur["precision"] = 3;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    bool found = false;
+    for (const auto& row : result.currencies) {
+        if (row.at("uuid").get<std::string>() != currency_uuid) continue;
+        CHECK_EQ(row.at("icon_uuid").get<std::string>(), icon_uuid);
+        REQUIRE(row.at("precision").is_number_integer());
+        CHECK_EQ(row.at("precision").get<int>(), 3);
+        found = true;
+    }
+    CHECK(found);
+}
+
+// currency-ui-tweaks, «Валюта скрыта из эквивалента»: снятый флаг не убирает
+// валюту из справочника — фильтрует клиент.
+TEST(list_currencies_keeps_currency_hidden_from_equivalent) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string currency_uuid = uuidgen::v4();
+    std::string iso = "BT" + uuidgen::v4().substr(0, 6);
+    json cur = currency_row(currency_uuid, icon_uuid, iso);
+    cur["show_in_equivalent"] = false;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    bool found = false;
+    for (const auto& row : result.currencies) {
+        if (row.at("uuid").get<std::string>() != currency_uuid) continue;
+        CHECK(!row.at("show_in_equivalent").get<bool>());
+        CHECK(row.at("is_own").get<bool>());
+        found = true;
+    }
+    CHECK(found);
+}
+
+// currency-ui-tweaks, «Своя валюта перекрывает общую»: общая с флагом true,
+// своя с тем же кодом и false — в списке одна строка, своя, с её флагом.
+TEST(list_currencies_own_currency_overrides_reference_with_its_flag) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string iso = "OV" + uuidgen::v4().substr(0, 6);
+    std::string reference_uuid = fixture::make_reference_currency(*db, iso, icon_uuid, true);
+    std::string own_uuid = uuidgen::v4();
+    json cur = currency_row(own_uuid, icon_uuid, iso);
+    cur["show_in_equivalent"] = false;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    int with_iso = 0;
+    for (const auto& row : result.currencies) {
+        if (row.at("iso_code").get<std::string>() != iso) continue;
+        ++with_iso;
+        CHECK_EQ(row.at("uuid").get<std::string>(), own_uuid);
+        CHECK(row.at("is_own").get<bool>());
+        CHECK(!row.at("show_in_equivalent").get<bool>());
+    }
+    CHECK_EQ(with_iso, 1);
+
+    // Без леджера та же общая валюта видна сама — общая, с флагом true.
+    auto reference_only = reports_repo::list_currencies(*reports_db, "");
+    bool found_reference = false;
+    for (const auto& row : reference_only.currencies) {
+        if (row.at("uuid").get<std::string>() != reference_uuid) continue;
+        CHECK(!row.at("is_own").get<bool>());
+        CHECK(row.at("show_in_equivalent").get<bool>());
+        found_reference = true;
+    }
+    CHECK(found_reference);
 }
 
 // Валюта из предыдущего теста — СВОЯ этого леджера (push_batch без явного
@@ -1663,6 +2220,9 @@ TEST(list_currencies_without_ledger_returns_only_reference) {
     auto result = reports_repo::list_currencies(*reports_db, "");
     for (const auto& row : result.currencies) {
         CHECK(row.at("uuid").get<std::string>() != currency_uuid);
+        // currency-ui-tweaks, «Нет леджера»: только общий справочник — у всех is_own: false.
+        CHECK(row.at("is_own").is_boolean());
+        CHECK(!row.at("is_own").get<bool>());
     }
 }
 

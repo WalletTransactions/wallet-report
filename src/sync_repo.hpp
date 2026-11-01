@@ -98,6 +98,13 @@ struct TableSpec {
     // uq_currency_pair_rate_ledger). Пусто, если conflict_columns не задан
     // либо целевой индекс не частичный.
     std::string conflict_where;
+    // Подмножество columns, которое строка push вправе НЕ нести — копия
+    // wallet-api (change currency-ui-tweaks, сегодня только
+    // currency.show_in_equivalent). Нет ключа — колонки нет ни в INSERT
+    // (работает DEFAULT таблицы), ни в DO UPDATE SET. Ключ есть — значение
+    // JSON-boolean. Здесь нужно тестам, которые засевают валюту со снятым
+    // флагом (test_reports.cpp, list_currencies_*).
+    std::vector<std::string> optional_columns;
 };
 
 // Все таблицы, которые клиент может ОТПРАВИТЬ — включая icon (метаданные;

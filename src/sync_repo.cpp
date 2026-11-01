@@ -1,6 +1,7 @@
 #include "sync_repo.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 
 using nlohmann::json;
 
@@ -13,8 +14,11 @@ const std::vector<TableSpec>& push_tables() {
         {"operation", Scope::LedgerOnly,
          {"date", "acc_fr_uuid", "acc_to_uuid", "amount", "comment"}, {"amount"}},
         {"operation_link", Scope::LedgerOnly, {"main_uuid", "link_uuid", "type"}},
+        // show_in_equivalent — необязательная (TableSpec::optional_columns),
+        // как в wallet-api: строки без ключа получают DEFAULT true.
         {"currency", Scope::ReferenceOrLedger,
-         {"name", "iso_code", "icon_uuid", "symbol", "precision"}},
+         {"name", "iso_code", "icon_uuid", "symbol", "precision", "show_in_equivalent"},
+         {}, {}, {}, {}, "", {"show_in_equivalent"}},
         {"currency_pair", Scope::ReferenceOrLedger,
          {"symbol", "base_currency_uuid", "quote_currency_uuid", "precision"}},
         // conflict_columns/conflict_where — см. TableSpec, почему именно у
@@ -113,6 +117,14 @@ void upsert_row(db::Database::Transaction& tx, const TableSpec& spec, const std:
 
     int idx = 6;
     for (const auto& col : spec.columns) {
+        // Необязательная колонка без ключа — вне INSERT и вне SET, см.
+        // TableSpec::optional_columns.
+        if (std::find(spec.optional_columns.begin(), spec.optional_columns.end(), col) !=
+            spec.optional_columns.end()) {
+            auto it = row.find(col);
+            if (it == row.end()) continue;
+            if (!it->is_boolean()) throw std::runtime_error(col + ": ожидается boolean");
+        }
         bool is_hex = std::find(spec.hex_columns.begin(), spec.hex_columns.end(), col) !=
                       spec.hex_columns.end();
         bool is_date_only = std::find(spec.date_only_columns.begin(), spec.date_only_columns.end(),

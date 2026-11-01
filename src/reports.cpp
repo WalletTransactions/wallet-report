@@ -348,8 +348,10 @@ void handle_expense_biggest_moves(AppState& state, const httplib::Request& req, 
 
 // "Список операций" (Design/.../Отчёты - веб (офлайн).html, вид 'ops') —
 // ОДНА страница операций периода (курсорная пагинация, см.
-// reports_repo.hpp у operations_for_period); фильтров на сервере по-прежнему
-// нет (клиент фильтрует уже загруженные страницы сам).
+// reports_repo.hpp у operations_for_period). Необязательные фильтры
+// category_uuid/wallet_uuid/kind/q (change add-operations-filters) — до
+// пагинации, в SQL; при хоть одном фильтре в ответе итог total_eq/
+// total_incomplete/total_count по всем подходящим операциям периода.
 void handle_operations(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("GET /api/reports/operations"); // литерал из register_routes ниже
     auto ctx = common_prolog(state, req, res);
@@ -391,12 +393,27 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
         return;
     }
 
+    // Фильтры — после курсора (design D2: прежние сценарии отвечают прежними
+    // текстами) и до запроса ленты, чтобы ошибка ввода не стала 500 на
+    // приведении ::uuid[] в Postgres.
+    reports_repo::OperationsFilter filter;
+    if (auto err = reports_repo::parse_operations_filter(
+            req.get_param_value("category_uuid"), req.get_param_value("wallet_uuid"),
+            req.get_param_value("kind"), req.get_param_value("q"), filter)) {
+        json_error(res, 400, *err);
+        return;
+    }
+
     reports_repo::OperationsResult result;
     if (!ctx->ledger_id.empty()) {
+        // Страница и итог — на одном соединении из пула (одна аренда).
         result = reports_repo::operations_for_period(*state.reports_pool->acquire(), ctx->ledger_id,
                                                        req.get_param_value("from"),
                                                        req.get_param_value("to"), ctx->eq_currency_uuid,
-                                                       limit, cursor_date, cursor_uuid);
+                                                       limit, cursor_date, cursor_uuid, filter);
+    } else if (filter.any()) {
+        // Нет леджера — итог "0"/false/0 без запроса (значения по умолчанию).
+        result.has_total = true;
     }
     json body = {
         {"operations", result.rows},
@@ -404,6 +421,12 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
         {"has_more", result.has_more},
         {"eq_currency_uuid", ctx->eq_currency_uuid},
     };
+    // Итог — только при фильтрах: без них ответ тот же, что до фильтров.
+    if (result.has_total) {
+        body["total_eq"] = result.total_eq;
+        body["total_incomplete"] = result.total_incomplete;
+        body["total_count"] = result.total_count;
+    }
     // next_cursor_date/next_cursor_uuid — только когда есть следующая
     // страница (has_more): пустые поля вместо отсутствующих ключей путали бы
     // клиента ("пустая строка — это валидный курсор?" — нет, следующая
