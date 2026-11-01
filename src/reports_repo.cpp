@@ -61,23 +61,39 @@ CurrenciesResult list_currencies(db::Database& db, const std::string& ledger_id)
     // параметра вовсе: $2, типизированный контекстом как uuid, не принял бы
     // пустую строку (см. остальные функции файла, почему они не вызываются
     // с пустым ledger_id вовсе, а не в том, что не пытались).
+    //
+    // show_in_equivalent/is_own/icon_uuid/precision (change currency-ui-tweaks)
+    // — флаг пикера эквивалента, «своя/общая» и текущие иконка и точность для
+    // формы правки на вебе. Список не фильтруется по флагу: тот же справочник
+    // нужен целиком пикерам валютных пар, фильтрует клиент. is_own — это
+    // (ledger_id IS NOT NULL): в запросе без леджера всегда false.
+    static const char* kSelect =
+        "c.uuid, c.iso_code, c.name, c.symbol, encode(i.content_sha256, 'hex'), "
+        "c.show_in_equivalent, (c.ledger_id IS NOT NULL), c.icon_uuid, c.\"precision\" "
+        "FROM currency c JOIN icon i ON i.uuid = c.icon_uuid ";
     auto res = ledger_id.empty()
-        ? db.exec(
-              "SELECT c.uuid, c.iso_code, c.name, c.symbol, encode(i.content_sha256, 'hex') "
-              "FROM currency c JOIN icon i ON i.uuid = c.icon_uuid "
-              "WHERE c.deleted_at IS NULL AND c.ledger_id IS NULL "
-              "ORDER BY c.iso_code")
-        : db.exec(
-              "SELECT DISTINCT ON (c.iso_code) c.uuid, c.iso_code, c.name, c.symbol, "
-              "encode(i.content_sha256, 'hex') "
-              "FROM currency c JOIN icon i ON i.uuid = c.icon_uuid "
-              "WHERE c.deleted_at IS NULL AND (c.ledger_id IS NULL OR c.ledger_id = $1) "
-              "ORDER BY c.iso_code, (c.ledger_id IS NULL)",
-              {ledger_id});
+        ? db.exec(std::string("SELECT ") + kSelect +
+                  "WHERE c.deleted_at IS NULL AND c.ledger_id IS NULL "
+                  "ORDER BY c.iso_code")
+        : db.exec(std::string("SELECT DISTINCT ON (c.iso_code) ") + kSelect +
+                      "WHERE c.deleted_at IS NULL AND (c.ledger_id IS NULL OR c.ledger_id = $1) "
+                      "ORDER BY c.iso_code, (c.ledger_id IS NULL)",
+                  {ledger_id});
 
     CurrenciesResult result;
-    static const std::vector<std::string> kColumns = {"uuid", "iso_code", "name", "symbol", "icon_sha256"};
-    for (const auto& row : res.rows) result.currencies.push_back(row_to_json(row.fields, kColumns));
+    static const std::vector<std::string> kColumns = {
+        "uuid", "iso_code", "name", "symbol", "icon_sha256",
+        "show_in_equivalent", "is_own", "icon_uuid", "precision",
+    };
+    for (const auto& row : res.rows) {
+        json out_row = row_to_json(row.fields, kColumns);
+        // Драйвер отдаёт всё текстом ("t"/"f", "2") — признаки настоящими
+        // JSON boolean, точность числом (тот же приём, что у list_accounts).
+        out_row["show_in_equivalent"] = row.fields.at(5) == "t";
+        out_row["is_own"] = row.fields.at(6) == "t";
+        out_row["precision"] = std::stoi(row.fields.at(8));
+        result.currencies.push_back(out_row);
+    }
     return result;
 }
 

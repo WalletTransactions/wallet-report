@@ -147,4 +147,20 @@ inline std::string make_reference_icon(db::Database& db) {
     return make_reference_icon_with_sha256(db).uuid;
 }
 
+// ОБЩАЯ (ledger_id IS NULL) валюта напрямую SQL — push_batch пишет только
+// валюты леджера (ledger_id подставляется сервером, см. sync_repo.hpp), а
+// тестам справочника валют нужна и общая строка (is_own: false, «своя
+// перекрывает общую»). iso_code/name уникальны среди общих (uq_currency_*_reference),
+// поэтому вызывающий передаёт уникальный код.
+inline std::string make_reference_currency(db::Database& db, const std::string& iso_code,
+                                           const std::string& icon_uuid, bool show_in_equivalent) {
+    std::string uuid = uuidgen::v4();
+    auto seq_res = db.exec("SELECT next_seq('00000000-0000-0000-0000-000000000001')");
+    db.exec("INSERT INTO currency (uuid, seq, name, iso_code, icon_uuid, symbol, show_in_equivalent) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            {uuid, seq_res.rows.at(0).fields.at(0), "ref-" + iso_code, iso_code, icon_uuid, iso_code,
+             show_in_equivalent ? "true" : "false"});
+    return uuid;
+}
+
 } // namespace fixture

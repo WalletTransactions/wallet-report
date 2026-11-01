@@ -1627,9 +1627,113 @@ TEST(list_currencies_includes_ledger_currency) {
         CHECK_EQ(row.at("name").get<std::string>(), iso);   // currency_row() выше кладёт iso и в name, и в symbol
         CHECK_EQ(row.at("symbol").get<std::string>(), iso);
         CHECK_EQ(row.at("icon_sha256").get<std::string>(), icon.sha256_hex); // "флаг страны" в выпадающем списке, по прямому запросу
+        // currency-ui-tweaks: своя валюта леджера, флаг по умолчанию (DEFAULT true).
+        CHECK(row.at("is_own").is_boolean());
+        CHECK(row.at("is_own").get<bool>());
+        CHECK(row.at("show_in_equivalent").is_boolean());
+        CHECK(row.at("show_in_equivalent").get<bool>());
         found = true;
     }
     CHECK(found);
+}
+
+// currency-ui-tweaks, «Поля для формы правки»: icon_uuid — uuid иконки, а не
+// только её sha256; precision — JSON-число. Точность 3, не 2: значение по
+// умолчанию колонки не должно случайно совпасть с ожидаемым.
+TEST(list_currencies_returns_icon_uuid_and_numeric_precision) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string currency_uuid = uuidgen::v4();
+    std::string iso = "KZ" + uuidgen::v4().substr(0, 6);
+    json cur = currency_row(currency_uuid, icon_uuid, iso);
+    cur["precision"] = 3;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    bool found = false;
+    for (const auto& row : result.currencies) {
+        if (row.at("uuid").get<std::string>() != currency_uuid) continue;
+        CHECK_EQ(row.at("icon_uuid").get<std::string>(), icon_uuid);
+        REQUIRE(row.at("precision").is_number_integer());
+        CHECK_EQ(row.at("precision").get<int>(), 3);
+        found = true;
+    }
+    CHECK(found);
+}
+
+// currency-ui-tweaks, «Валюта скрыта из эквивалента»: снятый флаг не убирает
+// валюту из справочника — фильтрует клиент.
+TEST(list_currencies_keeps_currency_hidden_from_equivalent) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string currency_uuid = uuidgen::v4();
+    std::string iso = "BT" + uuidgen::v4().substr(0, 6);
+    json cur = currency_row(currency_uuid, icon_uuid, iso);
+    cur["show_in_equivalent"] = false;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    bool found = false;
+    for (const auto& row : result.currencies) {
+        if (row.at("uuid").get<std::string>() != currency_uuid) continue;
+        CHECK(!row.at("show_in_equivalent").get<bool>());
+        CHECK(row.at("is_own").get<bool>());
+        found = true;
+    }
+    CHECK(found);
+}
+
+// currency-ui-tweaks, «Своя валюта перекрывает общую»: общая с флагом true,
+// своя с тем же кодом и false — в списке одна строка, своя, с её флагом.
+TEST(list_currencies_own_currency_overrides_reference_with_its_flag) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string iso = "OV" + uuidgen::v4().substr(0, 6);
+    std::string reference_uuid = fixture::make_reference_currency(*db, iso, icon_uuid, true);
+    std::string own_uuid = uuidgen::v4();
+    json cur = currency_row(own_uuid, icon_uuid, iso);
+    cur["show_in_equivalent"] = false;
+
+    auto push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                      json{{"currency", json::array({cur})}});
+    REQUIRE(push.http_status == 200);
+
+    auto result = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    int with_iso = 0;
+    for (const auto& row : result.currencies) {
+        if (row.at("iso_code").get<std::string>() != iso) continue;
+        ++with_iso;
+        CHECK_EQ(row.at("uuid").get<std::string>(), own_uuid);
+        CHECK(row.at("is_own").get<bool>());
+        CHECK(!row.at("show_in_equivalent").get<bool>());
+    }
+    CHECK_EQ(with_iso, 1);
+
+    // Без леджера та же общая валюта видна сама — общая, с флагом true.
+    auto reference_only = reports_repo::list_currencies(*reports_db, "");
+    bool found_reference = false;
+    for (const auto& row : reference_only.currencies) {
+        if (row.at("uuid").get<std::string>() != reference_uuid) continue;
+        CHECK(!row.at("is_own").get<bool>());
+        CHECK(row.at("show_in_equivalent").get<bool>());
+        found_reference = true;
+    }
+    CHECK(found_reference);
 }
 
 // Валюта из предыдущего теста — СВОЯ этого леджера (push_batch без явного
@@ -1663,6 +1767,9 @@ TEST(list_currencies_without_ledger_returns_only_reference) {
     auto result = reports_repo::list_currencies(*reports_db, "");
     for (const auto& row : result.currencies) {
         CHECK(row.at("uuid").get<std::string>() != currency_uuid);
+        // currency-ui-tweaks, «Нет леджера»: только общий справочник — у всех is_own: false.
+        CHECK(row.at("is_own").is_boolean());
+        CHECK(!row.at("is_own").get<bool>());
     }
 }
 

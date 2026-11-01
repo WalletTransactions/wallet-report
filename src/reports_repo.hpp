@@ -38,7 +38,11 @@ std::optional<std::string> resolve_eq_currency(db::Database& db, const std::stri
 // типизированный как uuid (Postgres откажется её скастовать), а использует
 // под пустой ledger_id отдельный текст запроса без этого параметра вовсе.
 struct CurrenciesResult {
-    // {uuid, iso_code, name, symbol, icon_sha256}, ORDER BY iso_code. При
+    // {uuid, iso_code, name, symbol, icon_sha256, show_in_equivalent (bool),
+    // is_own (bool, true — своя валюта леджера), icon_uuid, precision (число)},
+    // ORDER BY iso_code. Валюты со снятым show_in_equivalent из списка НЕ
+    // убираются — фильтрует клиент (пикер эквивалента), тот же справочник
+    // целиком нужен пикерам валютных пар (change currency-ui-tweaks). При
     // совпадении iso_code между общей валютой и своей этого леджера в
     // списке только ОДНА строка — своя (тот же приоритет, что у
     // resolve_eq_currency): без этого пользователь видел бы в выпадающем
