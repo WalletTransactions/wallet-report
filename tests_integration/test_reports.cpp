@@ -2292,3 +2292,324 @@ TEST(list_accounts_splits_by_account_operating_and_filters_archived) {
     }
     CHECK(found_archived);
 }
+
+// ---------------------------------------------------------------------------
+// Аналитика по категориям (change add-category-month-analytics, wallet-api 000030):
+// op_count в структуре, матрица «категория × месяц», исключение категорий в ленте.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Леджер с двумя валютами (EUR -> USD по 1.10 с 2024-01-01), счётом Transfer
+// (system_kind 1) и произвольными категориями. Эквивалент — USD.
+struct AnalyticsLedger {
+    fixture::TestIdentity identity;
+    std::string icon_uuid;
+    std::string usd, eur, iso_usd, pair_uuid;
+    std::string w_usd, w_eur, transfer;
+    std::string eq_currency;
+};
+
+void push_analytics(db::Database& db, db::Database& reports_db, AnalyticsLedger& l,
+                    const std::vector<std::pair<std::string, std::string>>& categories, const json& operations,
+                    const json& links) {
+    std::string iso_eur = "AE" + uuidgen::v4().substr(0, 6);
+    json accounts = json::array({account_row(l.w_usd, l.icon_uuid, "USD wallet " + l.w_usd),
+                                 account_row(l.w_eur, l.icon_uuid, "EUR wallet " + l.w_eur),
+                                 json{{"uuid", l.transfer}, {"name", "Transfer"}, {"comment", ""},
+                                      {"icon_uuid", l.icon_uuid}, {"is_archived", false},
+                                      {"system_kind", 1}, {"kind", 0}}});
+    for (const auto& [uuid, name] : categories) accounts.push_back(account_row(uuid, l.icon_uuid, name));
+    json changes = {
+        {"currency", json::array({currency_row(l.usd, l.icon_uuid, l.iso_usd),
+                                   currency_row(l.eur, l.icon_uuid, iso_eur)})},
+        {"currency_pair", json::array({currency_pair_row(l.pair_uuid, iso_eur + l.iso_usd, l.eur, l.usd)})},
+        {"currency_pair_rate",
+         json::array({currency_pair_rate_row(uuidgen::v4(), l.pair_uuid, "2024-01-01", "1.10")})},
+        {"account", accounts},
+        {"account_operating", json::array({account_operating_row(l.w_usd, l.usd),
+                                            account_operating_row(l.w_eur, l.eur)})},
+        {"operation", operations},
+        {"operation_link", links},
+    };
+    auto push = sync_repo::push_batch(db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+    auto eq = reports_repo::resolve_eq_currency(reports_db, l.iso_usd, l.identity.ledger_id);
+    REQUIRE(eq.has_value());
+    l.eq_currency = *eq;
+}
+
+AnalyticsLedger new_analytics_ledger(db::Database& db) {
+    AnalyticsLedger l;
+    l.identity = fixture::make_identity(db);
+    l.icon_uuid = fixture::make_reference_icon(db);
+    l.usd = uuidgen::v4();
+    l.eur = uuidgen::v4();
+    l.iso_usd = "AU" + uuidgen::v4().substr(0, 6);
+    l.pair_uuid = uuidgen::v4();
+    l.w_usd = uuidgen::v4();
+    l.w_eur = uuidgen::v4();
+    l.transfer = uuidgen::v4();
+    return l;
+}
+
+// Перевод USD -> EUR через Transfer: две ноги и связь type = 0.
+void add_transfer(const AnalyticsLedger& l, const std::string& date, const std::string& usd_out,
+                  const std::string& eur_in, json& operations, json& links) {
+    std::string main = uuidgen::v4(), leg = uuidgen::v4();
+    operations.push_back(operation_row(main, date, l.w_usd, l.transfer, usd_out));
+    operations.push_back(operation_row(leg, date, l.transfer, l.w_eur, eur_in));
+    links.push_back(operation_link_row(uuidgen::v4(), main, leg, 0));
+}
+
+const json* find_by_uuid(const json& rows, const std::string& uuid) {
+    for (const auto& r : rows) {
+        if (r.at("account_uuid").get<std::string>() == uuid) return &r;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// op_count у строк структуры: три покупки — 3; категория только из периода
+// сравнения — 0; Transfer — число переводов, чья разница вошла в сумму.
+TEST(expense_structure_op_count) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = new_analytics_ledger(*db);
+    std::string alcohol = uuidgen::v4(), only_cmp = uuidgen::v4();
+
+    json ops = json::array({
+        operation_row(uuidgen::v4(), "2026-06-02T10:00:00", l.w_usd, alcohol, "10.00"),
+        operation_row(uuidgen::v4(), "2026-06-12T10:00:00", l.w_usd, alcohol, "20.00"),
+        operation_row(uuidgen::v4(), "2026-06-22T10:00:00", l.w_usd, alcohol, "5.00"),
+        operation_row(uuidgen::v4(), "2026-05-10T10:00:00", l.w_usd, only_cmp, "7.00"),
+    });
+    json links = json::array();
+    add_transfer(l, "2026-06-15T10:00:00", "100.00", "80.00", ops, links); // 88 USD — потеря 12
+    add_transfer(l, "2026-06-16T10:00:00", "50.00", "40.00", ops, links);  // 44 USD — потеря 6
+    push_analytics(*db, *reports_db, l, {{alcohol, "Alcohol"}, {only_cmp, "Only cmp"}}, ops, links);
+
+    auto r = reports_repo::expense_structure_for_period(*reports_db, l.identity.ledger_id, "2026-06-01T00:00:00",
+                                                        "2026-06-30T23:59:59", l.eq_currency,
+                                                        std::string("2026-05-01T00:00:00"),
+                                                        std::string("2026-05-31T23:59:59"));
+    REQUIRE(r.categories.size() == static_cast<size_t>(3));
+    const json* a = find_by_uuid(r.categories, alcohol);
+    const json* t = find_by_uuid(r.categories, l.transfer);
+    const json* c = find_by_uuid(r.categories, only_cmp);
+    REQUIRE(a != nullptr);
+    REQUIRE(t != nullptr);
+    REQUIRE(c != nullptr);
+    CHECK_EQ(a->at("amount_eq").get<std::string>(), std::string("35.00"));
+    CHECK(a->at("op_count").is_number_integer());
+    CHECK_EQ(a->at("op_count").get<long long>(), 3LL);
+    CHECK_EQ(t->at("amount_eq").get<std::string>(), std::string("18.00"));
+    CHECK_EQ(t->at("op_count").get<long long>(), 2LL);
+    CHECK_EQ(c->at("amount_eq").get<std::string>(), std::string("0"));
+    CHECK(c->at("op_count").is_number_integer());
+    CHECK_EQ(c->at("op_count").get<long long>(), 0LL);
+}
+
+// Матрица за период сходится со структурой за тот же период: итог и число
+// операций каждой категории, общий итог; Transfer — net по месяцам (потеря
+// 3 в июне, выигрыш 1 в июле), а не обе ноги.
+TEST(expense_by_category_by_month_matches_structure) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = new_analytics_ledger(*db);
+    std::string food = uuidgen::v4(), alcohol = uuidgen::v4(), cafe = uuidgen::v4();
+
+    json ops = json::array({
+        operation_row(uuidgen::v4(), "2026-06-05T10:00:00", l.w_usd, food, "60.00"),
+        operation_row(uuidgen::v4(), "2026-06-25T10:00:00", l.w_usd, food, "40.00"),
+        operation_row(uuidgen::v4(), "2026-07-05T10:00:00", l.w_usd, food, "150.00"),
+        // 1.15 EUR * 1.10 = 1.265 USD — v_operation_eq округляет каждую операцию до 1.27.
+        operation_row(uuidgen::v4(), "2026-06-07T10:00:00", l.w_eur, alcohol, "1.15"),
+        operation_row(uuidgen::v4(), "2026-08-07T10:00:00", l.w_eur, alcohol, "1.15"),
+        operation_row(uuidgen::v4(), "2026-08-08T10:00:00", l.w_usd, cafe, "12.34"),
+    });
+    json links = json::array();
+    add_transfer(l, "2026-06-15T10:00:00", "91.00", "80.00", ops, links); // 88 USD — потеря 3
+    add_transfer(l, "2026-07-15T10:00:00", "43.00", "40.00", ops, links); // 44 USD — выигрыш 1
+    push_analytics(*db, *reports_db, l, {{food, "Продукты"}, {alcohol, "Alcohol"}, {cafe, "Кафе"}}, ops, links);
+
+    const char* from = "2026-06-01T00:00:00";
+    const char* to = "2026-08-31T23:59:59";
+    auto m = reports_repo::expense_by_category_by_month(*reports_db, l.identity.ledger_id, from, to, l.eq_currency);
+    auto s = reports_repo::expense_structure_for_period(*reports_db, l.identity.ledger_id, from, to, l.eq_currency,
+                                                        std::nullopt, std::nullopt);
+
+    CHECK(m.months == json::array({"2026-06-01", "2026-07-01", "2026-08-01"}));
+    REQUIRE(m.categories.size() == s.categories.size());
+    REQUIRE(m.categories.size() == static_cast<size_t>(4));
+    for (const auto& sc : s.categories) {
+        const json* mc = find_by_uuid(m.categories, sc.at("account_uuid").get<std::string>());
+        REQUIRE(mc != nullptr);
+        CHECK_EQ(mc->at("amount_eq").get<std::string>(), sc.at("amount_eq").get<std::string>());
+        CHECK_EQ(mc->at("op_count").get<long long>(), sc.at("op_count").get<long long>());
+    }
+    CHECK_EQ(m.total_eq, s.total_eq);
+    CHECK_EQ(m.total_eq, std::string("266.88")); // 250 + 2.54 + 12.34 + 2
+    CHECK(!m.incomplete);
+
+    const json* f = find_by_uuid(m.categories, food);
+    REQUIRE(f != nullptr);
+    CHECK_EQ(f->at("amount_eq").get<std::string>(), std::string("250.00"));
+    CHECK_EQ(f->at("op_count").get<long long>(), 3LL);
+    CHECK_EQ(f->at("account_name").get<std::string>(), std::string("Продукты"));
+    REQUIRE(f->at("months").size() == static_cast<size_t>(2));
+    CHECK_EQ(f->at("months")[0].at("month_start").get<std::string>(), std::string("2026-06-01"));
+    CHECK_EQ(f->at("months")[0].at("amount_eq").get<std::string>(), std::string("100.00"));
+    CHECK_EQ(f->at("months")[0].at("op_count").get<long long>(), 2LL);
+    CHECK_EQ(f->at("months")[1].at("month_start").get<std::string>(), std::string("2026-07-01"));
+    CHECK_EQ(f->at("months")[1].at("amount_eq").get<std::string>(), std::string("150.00"));
+    CHECK_EQ(f->at("months")[1].at("incomplete").get<bool>(), false);
+
+    const json* a = find_by_uuid(m.categories, alcohol);
+    REQUIRE(a != nullptr);
+    CHECK_EQ(a->at("amount_eq").get<std::string>(), std::string("2.54"));
+    REQUIRE(a->at("months").size() == static_cast<size_t>(2));
+    CHECK_EQ(a->at("months")[0].at("amount_eq").get<std::string>(), std::string("1.27"));
+
+    const json* t = find_by_uuid(m.categories, l.transfer);
+    REQUIRE(t != nullptr);
+    CHECK_EQ(t->at("amount_eq").get<std::string>(), std::string("2.00"));
+    CHECK_EQ(t->at("op_count").get<long long>(), 2LL);
+    REQUIRE(t->at("months").size() == static_cast<size_t>(2));
+    CHECK_EQ(t->at("months")[0].at("month_start").get<std::string>(), std::string("2026-06-01"));
+    CHECK_EQ(t->at("months")[0].at("amount_eq").get<std::string>(), std::string("3.00"));
+    CHECK_EQ(t->at("months")[0].at("op_count").get<long long>(), 1LL);
+    CHECK_EQ(t->at("months")[1].at("amount_eq").get<std::string>(), std::string("-1.00"));
+
+    // Порядок — по итогу категории убыванию.
+    CHECK_EQ(m.categories[0].at("account_uuid").get<std::string>(), food);
+}
+
+// Пустой месяц есть в списке месяцев и отсутствует у категорий; неполный
+// первый месяц считается только с from (25 месяцев 2024-11..2026-11).
+TEST(expense_by_category_by_month_months) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = new_analytics_ledger(*db);
+    std::string cat = uuidgen::v4();
+
+    json ops = json::array({
+        operation_row(uuidgen::v4(), "2024-11-03T10:00:00", l.w_usd, cat, "1000.00"), // до from
+        operation_row(uuidgen::v4(), "2024-11-10T10:00:00", l.w_usd, cat, "10.00"),
+        operation_row(uuidgen::v4(), "2026-06-10T10:00:00", l.w_usd, cat, "20.00"),
+        operation_row(uuidgen::v4(), "2026-08-10T10:00:00", l.w_usd, cat, "30.00"),
+    });
+    json links = json::array();
+    push_analytics(*db, *reports_db, l, {{cat, "Cat"}}, ops, links);
+
+    auto m = reports_repo::expense_by_category_by_month(*reports_db, l.identity.ledger_id, "2026-06-01T00:00:00",
+                                                        "2026-08-31T23:59:59", l.eq_currency);
+    CHECK(m.months == json::array({"2026-06-01", "2026-07-01", "2026-08-01"}));
+    REQUIRE(m.categories.size() == static_cast<size_t>(1));
+    const auto& months = m.categories[0].at("months");
+    REQUIRE(months.size() == static_cast<size_t>(2));
+    CHECK_EQ(months[0].at("month_start").get<std::string>(), std::string("2026-06-01"));
+    CHECK_EQ(months[1].at("month_start").get<std::string>(), std::string("2026-08-01"));
+    CHECK_EQ(m.total_eq, std::string("50.00"));
+
+    auto w = reports_repo::expense_by_category_by_month(*reports_db, l.identity.ledger_id, "2024-11-05T00:00:00",
+                                                        "2026-11-04T23:59:59", l.eq_currency);
+    REQUIRE(w.months.size() == static_cast<size_t>(25));
+    CHECK_EQ(w.months.front().get<std::string>(), std::string("2024-11-01"));
+    CHECK_EQ(w.months.back().get<std::string>(), std::string("2026-11-01"));
+    REQUIRE(w.categories.size() == static_cast<size_t>(1));
+    const auto& wm = w.categories[0].at("months");
+    REQUIRE(wm.size() == static_cast<size_t>(3));
+    CHECK_EQ(wm[0].at("month_start").get<std::string>(), std::string("2024-11-01"));
+    CHECK_EQ(wm[0].at("amount_eq").get<std::string>(), std::string("10.00"));
+    CHECK_EQ(wm[0].at("op_count").get<long long>(), 1LL);
+    CHECK_EQ(w.total_eq, std::string("60.00"));
+
+    // Пустой период — пустые категории, итог "0".
+    auto e = reports_repo::expense_by_category_by_month(*reports_db, l.identity.ledger_id, "2025-01-01T00:00:00",
+                                                        "2025-01-31T23:59:59", l.eq_currency);
+    CHECK(e.months == json::array({"2025-01-01"}));
+    CHECK(e.categories.empty());
+    CHECK_EQ(e.total_eq, std::string("0"));
+    CHECK(!e.incomplete);
+}
+
+// Исключение категорий: ни в страницах, ни в итоге; прямой перевод остаётся;
+// с wallet_uuid — по И; исключение категории дохода (сторона «откуда»);
+// обход по курсору без пропусков и дублей.
+TEST(operations_filter_exclude_categories) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.exclude_category_uuids = {l.k_taxi, l.k_nanny};
+    f.kind = "expense";
+    auto rows = all_filtered_rows(*reports_db, l, f, 2);
+    CHECK(sorted_uuids(rows) == sorted({l.e3, l.e4, l.e6, l.e7, l.u1}));
+    auto r = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                  FilterLedger::kTo, l.eq_currency, 2, "", "", f);
+    CHECK(r.has_total);
+    CHECK_EQ(as_number(r.total_eq), 320.0); // 120 + 80 + 70 + 50; u1 без курса
+    CHECK_EQ(r.total_count, 5LL);
+    CHECK(r.total_incomplete);
+
+    f = {};
+    f.exclude_category_uuids = {l.k_taxi}; // без kind — прямой перевод t1 остаётся
+    CHECK(filtered_uuids(*reports_db, l, f) ==
+          sorted({l.e3, l.e4, l.e5, l.i1, l.t1, l.e6, l.e7, l.u1}));
+
+    f = {};
+    f.wallet_uuids = {l.w_tinkoff};
+    f.exclude_category_uuids = {l.k_food}; // И: «Тинькофф», кроме «Продуктов»
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e3, l.e5, l.i1, l.t1}));
+
+    f = {};
+    f.exclude_category_uuids = {l.k_salary}; // категория на стороне «откуда»
+    auto all = filtered_uuids(*reports_db, l, f);
+    CHECK(std::find(all.begin(), all.end(), l.i1) == all.end());
+    CHECK_EQ(all.size(), static_cast<size_t>(9));
+
+    // Итог совпадает с суммой по всем страницам (лента и итог — одни условия).
+    f = {};
+    f.exclude_category_uuids = {l.k_cafe};
+    f.kind = "expense";
+    double sum = 0;
+    for (const auto& row : all_filtered_rows(*reports_db, l, f, 3)) {
+        const auto& eq = row.at("amount_eq").get<std::string>();
+        if (!eq.empty()) sum += as_number(eq);
+    }
+    r = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                             FilterLedger::kTo, l.eq_currency, 1000, "", "", f);
+    CHECK_EQ(as_number(r.total_eq), sum);
+    CHECK_EQ(r.total_count, static_cast<long long>(r.rows.size()));
+}
+
+TEST(operations_filter_exclude_parse_texts) {
+    reports_repo::OperationsFilter f;
+    std::string u = uuidgen::v4();
+
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", "", f).has_value());
+    CHECK(!f.any()); // пустое значение = без фильтра
+
+    CHECK_EQ(reports_repo::parse_operations_filter("", "abc", "", "", "", f).value_or(""),
+             std::string("exclude_category_uuid: некорректный uuid"));
+    CHECK_EQ(reports_repo::parse_operations_filter("", u + ",", "", "", "", f).value_or(""),
+             std::string("exclude_category_uuid: некорректный uuid"));
+
+    std::string fifty = u;
+    for (int i = 1; i < 50; ++i) fifty += "," + u;
+    CHECK(!reports_repo::parse_operations_filter("", fifty, "", "", "", f).has_value());
+    CHECK_EQ(f.exclude_category_uuids.size(), static_cast<size_t>(50));
+    CHECK_EQ(reports_repo::parse_operations_filter("", fifty + "," + u, "", "", "", f).value_or(""),
+             std::string("exclude_category_uuid: не больше 50 значений"));
+
+    CHECK_EQ(reports_repo::parse_operations_filter(u, u, "", "", "", f).value_or(""),
+             std::string("category_uuid и exclude_category_uuid нельзя задавать вместе"));
+
+    CHECK(!reports_repo::parse_operations_filter("", u, u, "expense", "", f).has_value());
+    CHECK(f.any());
+    CHECK_EQ(f.exclude_category_uuids.size(), static_cast<size_t>(1));
+    CHECK(f.category_uuids.empty());
+}

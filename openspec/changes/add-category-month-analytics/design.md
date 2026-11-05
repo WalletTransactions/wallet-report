@@ -53,6 +53,15 @@ numeric, op_count bigint, incomplete boolean)` — одна строка на н
 пустые клетки матрицы не нужны, а на 36 месяцев × 90 категорий они раздули бы
 результат.
 
+Реализация (миграция wallet-api `000030`): к колонкам D1 добавлены
+`icon_sha256` (как у структуры) и колонки D2 — `category_amount_eq`,
+`category_op_count`, `total_eq`. Список месяцев wallet-report получает тем
+же `generate_series` отдельным запросом на том же соединении, а не разбором
+дат в C++. У Transfer месяц — минус net ног этого месяца: месяц с выигрышем
+на курсе даёт отрицательную сумму, месяц с net = 0 не выводится; категория
+Transfer есть, только если net за весь период отрицателен (как строка
+Transfer в структуре) — тогда её месяцы в сумме дают её итог.
+
 ### D2. Общий итог и `incomplete` — из SQL
 
 `total_eq` ответа — сумма `amount_eq` всех строк функции, посчитанная
@@ -60,6 +69,11 @@ numeric, op_count bigint, incomplete boolean)` — одна строка на н
 сложением `double` в C++. У категории `total_eq` — `sum` по её месяцам тем же
 способом. `incomplete` — `bool_or` по строкам, у которых не нашлось курса,
 тем же правилом, что в `f_income_expense_by_month`.
+
+Реализация: итог категории — `round(sum(amount_eq) за период)` по категории
+внутри функции (ровно `amount_eq` строки структуры), `total_eq` — сумма этих
+итогов там же; общий `incomplete` — `bool_or(incomplete) OVER ()` в запросе
+wallet-report.
 
 Альтернатива — суммировать в wallet-report: в `expense_structure_for_period`
 уже есть `parse_opt_double`, и итог через `double` теряет копейки на больших
@@ -73,6 +87,11 @@ numeric, op_count bigint, incomplete boolean)` — одна строка на н
 в `000022`, и повторного `GRANT EXECUTE … TO wallet_reader`. wallet-report
 пробрасывает поле в строку `/expense-structure`; у категорий только из
 периода сравнения — `0`.
+
+Реализация: у Transfer считаются все переводы периода (`count(DISTINCT
+ol.main_uuid)` по ногам), а не только убыточные по отдельности: net строки —
+сумма разниц ВСЕХ переводов периода, и по спеке `op_count` — число переводов,
+чья разница вошла в сумму.
 
 ### D4. `exclude_category_uuid` — новый параметр функций операций
 

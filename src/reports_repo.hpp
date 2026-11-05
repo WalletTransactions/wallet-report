@@ -110,7 +110,8 @@ ReportResult expense_for_period(db::Database& db, const std::string& ledger_id,
 // валюта), как expense_for_period) — обёртка над
 // f_expanse_by_category_for_period. Валюты уже смешаны через amount_eq,
 // поэтому в rows нет ни "currency_uuid", ни "amount" (своя сумма), только
-// "account_uuid"/"account_name"/"amount_eq"/"icon_sha256" (hex content_sha256
+// "account_uuid"/"account_name"/"amount_eq"/"icon_sha256"/"op_count" (op_count —
+// JSON-число операций в сумме строки, у Transfer — число переводов; hex content_sha256 у icon_sha256
 // иконки категории — у account.icon_uuid FK NOT NULL, значит есть всегда;
 // картинку веб-клиент качает сам через GET /sync/blobs/:sha256, см. blob.hpp
 // — сессионной куки достаточно, device_id не нужен). Основа
@@ -153,6 +154,30 @@ StructureResult expense_structure_for_period(db::Database& db, const std::string
                                               const std::string& eq_currency_uuid,
                                               const std::optional<std::string>& cmp_from,
                                               const std::optional<std::string>& cmp_to);
+
+// Расход «категория × календарный месяц» (GET /api/reports/expense-by-category-by-month,
+// change add-category-month-analytics) — обёртка над f_expense_by_category_by_month.
+// Правила — те же, что у /expense-structure (ноги перевода погашены в Transfer),
+// поэтому amount_eq категории и total_eq равны полям структуры за тот же период.
+//
+// months — ВСЕ календарные месяцы периода строками "YYYY-MM-DD" (generate_series
+// от date_trunc('month', from) до to, в базе); у категории в её months — только
+// непустые клетки. Все суммы и итоги — numeric из базы текстом (design D2): ни
+// одна сумма не складывается в C++.
+//
+// categories[i]: {account_uuid, account_name, icon_sha256, amount_eq (итог за
+// период; null — ни у одной операции нет курса), op_count (число),
+// months: [{month_start, amount_eq, op_count, incomplete}]}.
+struct CategoryByMonthResult {
+    nlohmann::json months = nlohmann::json::array();
+    nlohmann::json categories = nlohmann::json::array();
+    std::string total_eq = "0";
+    bool incomplete = false;
+};
+
+CategoryByMonthResult expense_by_category_by_month(db::Database& db, const std::string& ledger_id,
+                                                   const std::string& from, const std::string& to,
+                                                   const std::string& eq_currency_uuid);
 
 // "Обзор" (Design/.../Отчёты - веб.dc.html, экран "обзор", по прямому
 // запросу — без групп категорий и без "обязательных платежей", их
@@ -274,12 +299,17 @@ struct OperationsResult {
 // литерал массива '{a,b}', и битый uuid дал бы ошибку Postgres (500), а не 400.
 struct OperationsFilter {
     std::vector<std::string> category_uuids; // ИЛИ внутри списка; только неоперационная сторона
+    // Исключение (add-category-month-analytics): операции этих категорий (та же
+    // неоперационная сторона) отбрасываются; прямой перевод кошелёк → кошелёк
+    // остаётся. С category_uuids вместе не задаётся (400 в parse_operations_filter).
+    std::vector<std::string> exclude_category_uuids;
     std::vector<std::string> wallet_uuids;   // ИЛИ; операционная сторона, прямой перевод — по любому из двух
     std::string kind;                        // "", "expense", "income", "transfer"
     std::string q;                           // подстрока комментария, без регистра, ё = е, буквально
 
     bool any() const {
-        return !category_uuids.empty() || !wallet_uuids.empty() || !kind.empty() || !q.empty();
+        return !category_uuids.empty() || !exclude_category_uuids.empty() || !wallet_uuids.empty() ||
+               !kind.empty() || !q.empty();
     }
 };
 
@@ -287,11 +317,20 @@ struct OperationsFilter {
 // httplib (её зовут handle_operations и интеграционные тесты). Возвращает
 // текст ошибки для 400 или nullopt, если всё в порядке (тогда out заполнен).
 // Тексты — дословно из spec «Проверка параметров фильтра»; порядок проверок:
-// category_uuid → wallet_uuid → kind → q.
+// category_uuid → exclude_category_uuid → оба вместе → wallet_uuid → kind → q.
 std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                    const std::string& exclude_category_uuid,
                                                     const std::string& wallet_uuid,
                                                     const std::string& kind, const std::string& q,
                                                     OperationsFilter& out);
+
+// Прежняя форма — без исключения (тесты фильтров до add-category-month-analytics).
+inline std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                           const std::string& wallet_uuid,
+                                                           const std::string& kind, const std::string& q,
+                                                           OperationsFilter& out) {
+    return parse_operations_filter(category_uuid, std::string(), wallet_uuid, kind, q, out);
+}
 
 struct OperationsTotal {
     std::string total_eq = "0"; // с kind — неотрицательная сумма, без — доходы минус расходы

@@ -216,7 +216,7 @@ ReportResult expense_by_category_for_period(db::Database& db, const std::string&
     // amount_eq), под другой набор колонок пришлось бы городить условия в
     // общей функции ради одного вызывающего.
     auto result = db.exec(
-        "SELECT account_uuid, account_name, amount_eq, icon_sha256, "
+        "SELECT account_uuid, account_name, amount_eq, icon_sha256, op_count, "
         "COALESCE(sum(amount_eq) OVER (), 0)::text AS total_eq, "
         "bool_or(amount_eq IS NULL) OVER () AS incomplete "
         "FROM f_expanse_by_category_for_period($1, $2, $3, $4)",
@@ -226,14 +226,21 @@ ReportResult expense_by_category_for_period(db::Database& db, const std::string&
     // encode(...,'hex') там же, а не здесь — единственный вызывающий, не
     // общий механизм TableSpec::hex_columns протокола синка). Веб-клиент
     // собирает по ней URL GET /sync/blobs/:sha256 сам (см. reports_repo.hpp).
+    //
+    // op_count (add-category-month-analytics) — JSON-числом, как precision у
+    // остальных отчётов: число операций в сумме строки, у Transfer — переводов.
     static const std::vector<std::string> kColumns = {
-        "account_uuid", "account_name", "amount_eq", "icon_sha256",
+        "account_uuid", "account_name", "amount_eq", "icon_sha256", "op_count",
     };
     ReportResult out;
-    for (const auto& row : result.rows) out.rows.push_back(row_to_json(row.fields, kColumns));
+    for (const auto& row : result.rows) {
+        json out_row = row_to_json(row.fields, kColumns);
+        out_row["op_count"] = std::stoll(row.fields.at(4));
+        out.rows.push_back(out_row);
+    }
     if (!result.rows.empty()) {
-        out.total_eq = result.rows[0].fields.at(4);
-        out.incomplete = result.rows[0].fields.at(5) == "t";
+        out.total_eq = result.rows[0].fields.at(5);
+        out.incomplete = result.rows[0].fields.at(6) == "t";
     }
     return out;
 }
@@ -340,6 +347,7 @@ StructureResult expense_structure_for_period(db::Database& db, const std::string
                 {"account_name", before_row.at("account_name")},
                 {"amount_eq", "0"},
                 {"icon_sha256", before_row.at("icon_sha256")}, // иконка категории не меняется между периодами
+                {"op_count", 0}, // в основном периоде операций категории нет
             };
             out_row["pct"] = (total_now > 0.0) ? json(format_pct(0.0)) : json(nullptr);
 
@@ -353,6 +361,59 @@ StructureResult expense_structure_for_period(db::Database& db, const std::string
         }
     }
 
+    return out;
+}
+
+CategoryByMonthResult expense_by_category_by_month(db::Database& db, const std::string& ledger_id,
+                                                   const std::string& from, const std::string& to,
+                                                   const std::string& eq_currency_uuid) {
+    CategoryByMonthResult out;
+
+    // Все месяцы периода — тем же generate_series, что у f_income_expense_by_month
+    // (design D1: пустые клетки матрицы из базы не тянем, список месяцев один).
+    auto months = db.exec(
+        "SELECT to_char(m, 'YYYY-MM-DD') FROM generate_series("
+        "date_trunc('month', $1::timestamp), date_trunc('month', $2::timestamp), interval '1 month') AS m",
+        {from, to});
+    for (const auto& row : months.rows) out.months.push_back(row.fields.at(0));
+
+    // Строки уже упорядочены функцией: категории по итогу DESC, внутри — по
+    // месяцу, поэтому новая категория начинается там, где сменился account_uuid.
+    // total_eq — из функции (сумма итогов категорий в SQL), incomplete — bool_or
+    // по всем клеткам тоже в SQL (design D2).
+    auto result = db.exec(
+        "SELECT account_uuid, account_name, icon_sha256, month_start, amount_eq, op_count, incomplete, "
+        "category_amount_eq, category_op_count, total_eq::text, "
+        "bool_or(incomplete) OVER () "
+        "FROM f_expense_by_category_by_month($1, $2, $3, $4)",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    auto nullable = [](const std::string& s) { return s.empty() ? json(nullptr) : json(s); };
+    std::string current;
+    for (const auto& row : result.rows) {
+        const auto& f = row.fields;
+        if (out.categories.empty() || f.at(0) != current) {
+            current = f.at(0);
+            out.categories.push_back({
+                {"account_uuid", f.at(0)},
+                {"account_name", f.at(1)},
+                {"icon_sha256", f.at(2)},
+                {"amount_eq", nullable(f.at(7))},
+                {"op_count", std::stoll(f.at(8))},
+                {"months", json::array()},
+            });
+        }
+        out.categories.back()["months"].push_back({
+            {"month_start", f.at(3)},
+            {"amount_eq", nullable(f.at(4))},
+            {"op_count", std::stoll(f.at(5))},
+            {"incomplete", f.at(6) == "t"},
+        });
+    }
+    if (!result.rows.empty()) {
+        out.total_eq = result.rows[0].fields.at(9);
+        out.incomplete = result.rows[0].fields.at(10) == "t";
+    }
     return out;
 }
 
@@ -561,6 +622,10 @@ void append_filter_args(const OperationsFilter& filter, std::string& args, std::
         args += ", p_category_uuids => " + next() + "::uuid[]";
         params.push_back(uuid_array_literal(filter.category_uuids));
     }
+    if (!filter.exclude_category_uuids.empty()) {
+        args += ", p_exclude_category_uuids => " + next() + "::uuid[]";
+        params.push_back(uuid_array_literal(filter.exclude_category_uuids));
+    }
     if (!filter.wallet_uuids.empty()) {
         args += ", p_wallet_uuids => " + next() + "::uuid[]";
         params.push_back(uuid_array_literal(filter.wallet_uuids));
@@ -578,11 +643,20 @@ void append_filter_args(const OperationsFilter& filter, std::string& args, std::
 } // namespace
 
 std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                    const std::string& exclude_category_uuid,
                                                     const std::string& wallet_uuid,
                                                     const std::string& kind, const std::string& q,
                                                     OperationsFilter& out) {
     out = OperationsFilter{};
     if (auto err = parse_uuid_list("category_uuid", category_uuid, out.category_uuids)) return err;
+    if (auto err = parse_uuid_list("exclude_category_uuid", exclude_category_uuid, out.exclude_category_uuids)) {
+        return err;
+    }
+    // «Только эти, кроме этих» не нужен ни одному клиенту — ошибка проще
+    // правила приоритета (design D4).
+    if (!out.category_uuids.empty() && !out.exclude_category_uuids.empty()) {
+        return std::string("category_uuid и exclude_category_uuid нельзя задавать вместе");
+    }
     if (auto err = parse_uuid_list("wallet_uuid", wallet_uuid, out.wallet_uuids)) return err;
     if (!kind.empty() && kind != "expense" && kind != "income" && kind != "transfer") {
         return std::string("kind должен быть expense, income или transfer");
