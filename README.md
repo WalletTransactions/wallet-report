@@ -73,11 +73,12 @@ Postgres отклонит любую попытку `INSERT`/`UPDATE`/`DELETE` �
 | --- | --- |
 | `GET /api/reports/balance` | Баланс каждого кошелька леджера на дату |
 | `GET /api/reports/income` / `/expense` | Доход/расход за период с разбивкой по счёту |
-| `GET /api/reports/expense-structure` | Доля каждой категории в расходе за период, с необязательным сравнением периодов |
+| `GET /api/reports/expense-structure` | Доля каждой категории в расходе за период, с необязательным сравнением периодов; у строки `op_count` — число операций |
+| `GET /api/reports/expense-by-category-by-month` | Расход по категориям в разрезе календарных месяцев: все месяцы периода, у категории — итог, `op_count` и непустые месяцы. Итоги совпадают с `/expense-structure` (ноги перевода погашены в Transfer), а не с `/income-expense-by-month` |
 | `GET /api/reports/income-expense-by-month` | Доход/расход по месяцам — экран "Обзор" |
 | `GET /api/reports/expense-by-weekday` | Расход по дню недели — экран "Обзор" |
 | `GET /api/reports/expense-biggest-moves` | Категории с наибольшим изменением расхода между двумя периодами — экран "Обзор" |
-| `GET /api/reports/operations` | Операции периода страницами по курсору — экран "Список операций"; необязательные фильтры `category_uuid`, `wallet_uuid` (списки через запятую), `kind`, `q` до пагинации, при фильтрах — итог `total_eq`/`total_incomplete`/`total_count` по всему периоду |
+| `GET /api/reports/operations` | Операции периода страницами по курсору — экран "Список операций"; необязательные фильтры `category_uuid`, `exclude_category_uuid` (всё, кроме этих категорий; вместе с `category_uuid` — 400), `wallet_uuid` (списки через запятую), `kind`, `q` до пагинации, при фильтрах — итог `total_eq`/`total_incomplete`/`total_count` по всему периоду |
 | `GET /api/reports/currencies` | Справочник валют — для выпадающего списка "Валюта эквивалента" и списка валют; у элемента `show_in_equivalent`, `is_own` (boolean), `icon_uuid`, `precision` (число) |
 | `GET /api/reports/accounts` | Все живые кошельки и категории леджера (`kind`, `include_archived`) — для Telegram-бота |
 | `GET /api/reports/icons` | Иконки, доступные леджеру: общий набор (`common`) и свои (`user`) — вкладка "Иконки" |

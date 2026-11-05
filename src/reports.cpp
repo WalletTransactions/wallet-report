@@ -245,6 +245,40 @@ void handle_expense_structure(AppState& state, const httplib::Request& req, http
     res.set_content(body.dump(), kJsonContentType);
 }
 
+// Расход «категория × месяц» (change add-category-month-analytics, первый
+// потребитель — wallet-mcp): те же from/to/eq_currency и те же 400 до базы,
+// что у /expense-structure; правила группировки — тоже её (ноги перевода
+// погашены в Transfer), поэтому итоги совпадают со структурой, а не с
+// /income-expense-by-month. Без леджера — пустой ответ без запроса (months
+// тоже пуст: список месяцев строит база).
+void handle_expense_by_category_by_month(AppState& state, const httplib::Request& req,
+                                         httplib::Response& res) {
+    applog::set_route("GET /api/reports/expense-by-category-by-month"); // литерал из register_routes ниже
+    auto ctx = common_prolog(state, req, res);
+    if (!ctx) return;
+
+    if (!req.has_param("from") || req.get_param_value("from").empty() ||
+        !req.has_param("to") || req.get_param_value("to").empty()) {
+        json_error(res, 400, "from и to обязательны");
+        return;
+    }
+
+    reports_repo::CategoryByMonthResult result;
+    if (!ctx->ledger_id.empty()) {
+        result = reports_repo::expense_by_category_by_month(*state.reports_pool->acquire(), ctx->ledger_id,
+                                                            req.get_param_value("from"),
+                                                            req.get_param_value("to"), ctx->eq_currency_uuid);
+    }
+    json body = {
+        {"months", result.months},
+        {"categories", result.categories},
+        {"total_eq", result.total_eq},
+        {"incomplete", result.incomplete},
+        {"eq_currency_uuid", ctx->eq_currency_uuid},
+    };
+    res.set_content(body.dump(), kJsonContentType);
+}
+
 // "Обзор" (Design/.../Отчёты - веб.dc.html, экран "обзор") — три отдельные
 // панели, три отдельных хендлера ниже: KPI-плитки и мини-"Структура" самого
 // экрана "Обзор" на клиенте переиспользуют /balance,/income,/expense,
@@ -349,7 +383,8 @@ void handle_expense_biggest_moves(AppState& state, const httplib::Request& req, 
 // "Список операций" (Design/.../Отчёты - веб (офлайн).html, вид 'ops') —
 // ОДНА страница операций периода (курсорная пагинация, см.
 // reports_repo.hpp у operations_for_period). Необязательные фильтры
-// category_uuid/wallet_uuid/kind/q (change add-operations-filters) — до
+// category_uuid/wallet_uuid/kind/q (change add-operations-filters) и
+// exclude_category_uuid (add-category-month-analytics) — до
 // пагинации, в SQL; при хоть одном фильтре в ответе итог total_eq/
 // total_incomplete/total_count по всем подходящим операциям периода.
 void handle_operations(AppState& state, const httplib::Request& req, httplib::Response& res) {
@@ -398,7 +433,8 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
     // приведении ::uuid[] в Postgres.
     reports_repo::OperationsFilter filter;
     if (auto err = reports_repo::parse_operations_filter(
-            req.get_param_value("category_uuid"), req.get_param_value("wallet_uuid"),
+            req.get_param_value("category_uuid"), req.get_param_value("exclude_category_uuid"),
+            req.get_param_value("wallet_uuid"),
             req.get_param_value("kind"), req.get_param_value("q"), filter)) {
         json_error(res, 400, *err);
         return;
@@ -783,6 +819,10 @@ void register_routes(httplib::Server& svr, AppState& state) {
     svr.Get("/api/reports/expense-structure",
             [&state](const httplib::Request& req, httplib::Response& res) {
                 handle_expense_structure(state, req, res);
+            });
+    svr.Get("/api/reports/expense-by-category-by-month",
+            [&state](const httplib::Request& req, httplib::Response& res) {
+                handle_expense_by_category_by_month(state, req, res);
             });
     svr.Get("/api/reports/income-expense-by-month",
             [&state](const httplib::Request& req, httplib::Response& res) {

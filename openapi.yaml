@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: wallet-report
-  version: "1.0.0"
+  version: "0.2.0"
   description: |
     Сервис отчётов (CQRS-lite query-сторона, выделена из `wallet-api`
     2026-09-08 — см. `wallet-report/README.md`, "История"). Читает
@@ -246,6 +246,58 @@ paths:
           content:
             application/json: {schema: {$ref: "#/components/schemas/ExpenseStructureReport"}}
 
+  /api/reports/expense-by-category-by-month:
+    get:
+      operationId: reportExpenseByCategoryByMonth
+      summary: Расход по категориям в разрезе календарных месяцев
+      description: |
+        Обёртка над `f_expense_by_category_by_month` (wallet-api 000030).
+        Правила группировки — те же, что у `/expense-structure`: по категории,
+        валюты смешаны через `amount_eq`, ноги кросс-валютного перевода
+        погашены в одну категорию Transfer (net). Поэтому итог каждой категории
+        (`amount_eq`, `op_count`) и общий `total_eq` равны полям
+        `/expense-structure` за тот же период и ту же `eq_currency` — но НЕ
+        сумме `expense_eq` из `/income-expense-by-month`: там ноги перевода
+        входят в расход обе целиком.
+
+        `months` — каждый календарный месяц, который задевает период (от
+        месяца `from` до месяца `to` включительно), в том числе без расхода;
+        у категории в её `months` — только месяцы с расходом. Месяц операции
+        — по её дате без перевода часового пояса, как у
+        `/income-expense-by-month`; крайние неполные месяцы считаются только
+        в пределах `from`..`to`.
+
+        У Transfer месячная сумма — потеря на курсе за месяц: месяц с
+        выигрышем даёт отрицательную сумму, месяц с нулевой разницей не
+        выводится. Сама категория Transfer есть в ответе, только если за весь
+        период потеря (как строка Transfer в `/expense-structure`).
+
+        Все суммы — numeric из базы строкой; итоги посчитаны в SQL, а не
+        сложением на сервисе. Средние, фильтры по категориям и месяцам года
+        вычисляет вызывающий над этими агрегатами.
+
+        Без леджера — 200 с пустыми `months` и `categories`, `total_eq: "0"`.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код (проверяется до запроса отчёта)"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Расход по категориям и месяцам периода
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/CategoryByMonthReport"}}
+
   /api/reports/income-expense-by-month:
     get:
       operationId: reportIncomeExpenseByMonth
@@ -359,7 +411,7 @@ paths:
       summary: Страница операций периода — экран "Список операций"
       description: |
         Обёртка над `f_operations_for_period`. Необязательные фильтры
-        `category_uuid`, `wallet_uuid`, `kind`, `q` применяются на сервере ДО
+        `category_uuid`, `exclude_category_uuid`, `wallet_uuid`, `kind`, `q` применяются на сервере ДО
         пагинации: фильтры между собой — по И, значения внутри списка — по ИЛИ,
         пустое значение параметра равносильно его отсутствию. `has_more` и
         курсор относятся к отфильтрованному набору — при обходе по курсору с
@@ -367,6 +419,10 @@ paths:
 
         - `category_uuid` сопоставляется только с категорией операции:
           прямой перевод кошелёк → кошелёк под него не попадает.
+        - `exclude_category_uuid` — обратный фильтр: операции этих категорий
+          не попадают ни в страницу, ни в итог («всё, кроме ремонта»). Прямой
+          перевод кошелёк → кошелёк категории не имеет и не исключается.
+          Вместе с `category_uuid` не задаётся — 400.
         - `wallet_uuid` — только с кошельками операции, с любой стороны;
           прямой перевод находится по любому из двух кошельков.
         - uuid, которого нет в леджере пользователя (чужой, или uuid
@@ -428,6 +484,12 @@ paths:
           schema: {type: string}
           example: "3f1c2a9e-0b7d-4e7a-9c1e-5a2b8d4f6e01,7d2e4b6a-1c3f-4a8e-b5d7-9e0f2a4c6b18"
           description: "Фильтр по категориям: до 50 uuid через запятую, ИЛИ внутри списка. Только категория операции (неоперационная сторона проводки); прямой перевод кошелёк → кошелёк не попадает."
+        - name: exclude_category_uuid
+          in: query
+          required: false
+          schema: {type: string}
+          example: "3f1c2a9e-0b7d-4e7a-9c1e-5a2b8d4f6e01"
+          description: "Исключить категории: до 50 uuid через запятую. Операции, чья категория (неоперационная сторона проводки) в списке, не попадают ни в страницу, ни в итог; прямой перевод кошелёк → кошелёк остаётся. Считается фильтром (с ним в ответе есть итог). Несовместим с category_uuid."
         - name: wallet_uuid
           in: query
           required: false
@@ -454,7 +516,11 @@ paths:
             диапазона 1..1000, задан только один из cursor_date/cursor_uuid, либо неверный
             фильтр. Тексты ошибок фильтра (проверяются после курсора, в этом порядке):
             `category_uuid: некорректный uuid` (не-uuid или пустой элемент списка),
-            `category_uuid: не больше 50 значений`, то же для `wallet_uuid`,
+            `category_uuid: не больше 50 значений`,
+            `exclude_category_uuid: некорректный uuid`,
+            `exclude_category_uuid: не больше 50 значений`,
+            `category_uuid и exclude_category_uuid нельзя задавать вместе`,
+            `wallet_uuid: некорректный uuid`, `wallet_uuid: не больше 50 значений`,
             `kind должен быть expense, income или transfer`,
             `q: не длиннее 100 символов` (в том числе битый UTF-8).
           content:
@@ -900,7 +966,11 @@ components:
         pp_delta:
           type: [string, "null"]
           description: "Присутствует, только если запрос указывал cmp_from/cmp_to. pct минус pct_before, в процентных пунктах. null, если хотя бы один из них null."
-      required: [account_uuid, account_name, amount_eq, icon_sha256, pct]
+        op_count:
+          type: integer
+          minimum: 0
+          description: "Число операций расхода, вошедших в amount_eq за основной период. У Transfer — число переводов, чья разница на курсе вошла в сумму. 0 у категории, которая встречалась только в cmp-периоде."
+      required: [account_uuid, account_name, amount_eq, icon_sha256, pct, op_count]
 
     ExpenseStructureReport:
       type: object
@@ -923,6 +993,53 @@ components:
           format: uuid
           description: "См. BalanceReport.eq_currency_uuid — тот же смысл."
       required: [categories, total_eq, incomplete, compared, eq_currency_uuid]
+
+    CategoryByMonthCell:
+      type: object
+      properties:
+        month_start: {type: string, description: "\"YYYY-MM-DD\", первое число месяца"}
+        amount_eq:
+          type: [string, "null"]
+          description: "Расход категории за месяц в eq_currency (у Transfer может быть отрицательным — выигрыш на курсе). null — ни у одной операции клетки нет курса."
+        op_count: {type: integer, minimum: 0, description: "Число операций (у Transfer — переводов) в клетке"}
+        incomplete: {type: boolean, description: "true — у части операций клетки нет курса в eq_currency, в сумму они не вошли"}
+      required: [month_start, amount_eq, op_count, incomplete]
+
+    CategoryByMonthRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        icon_sha256: {type: string, description: "См. ExpenseStructureRow.icon_sha256"}
+        amount_eq:
+          type: [string, "null"]
+          description: "Итог категории за период — равен amount_eq её строки в /expense-structure за тот же период. null — ни у одной операции нет курса."
+        op_count: {type: integer, minimum: 0, description: "Число операций категории за период — равно op_count строки /expense-structure"}
+        months:
+          type: array
+          description: "Только месяцы с расходом, по возрастанию"
+          items: {$ref: "#/components/schemas/CategoryByMonthCell"}
+      required: [account_uuid, account_name, icon_sha256, amount_eq, op_count, months]
+
+    CategoryByMonthReport:
+      type: object
+      properties:
+        months:
+          type: array
+          description: "Все календарные месяцы периода (\"YYYY-MM-DD\", первое число), включая месяцы без расхода"
+          items: {type: string}
+        categories:
+          type: array
+          description: "Категории по убыванию amount_eq"
+          items: {$ref: "#/components/schemas/CategoryByMonthRow"}
+        total_eq:
+          type: string
+          description: "Сумма amount_eq всех категорий (посчитана в SQL) — равна total_eq /expense-structure за тот же период"
+        incomplete:
+          type: boolean
+          description: "true — хотя бы у одной операции периода нет курса в eq_currency"
+        eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
+      required: [months, categories, total_eq, incomplete, eq_currency_uuid]
 
     MonthlyPoint:
       type: object
