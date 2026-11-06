@@ -1163,6 +1163,76 @@ TEST(operations_filter_q_case_yo_and_literal_wildcards) {
     CHECK(std::find(rows.begin(), rows.end(), l.e7) == rows.end());
 }
 
+// Несколько вариантов q (search-text-variants): комментарий с ЛЮБЫМ из них,
+// те же правила (регистр, ё = е, буквально); операция, подходящая под два
+// варианта, — одна строка ленты и один раз в итоге.
+TEST(operations_filter_q_variants_match_any_and_count_once) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.qs = {"ЁЛКА", "кофе"}; // «новогодняя елка», «Кофе 100% арабика»
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e6, l.e3}));
+
+    f.qs = {"1_0", "100%"}; // «1_0» буквально — ни с чем, «100%» — только e3
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e3}));
+
+    // «такси в аэропорт» подходит под оба варианта — не задваивается.
+    reports_repo::OperationsFilter one;
+    one.q = "такси";
+    one.kind = "expense";
+    f = {};
+    f.qs = {"такси", "аэропорт"};
+    f.kind = "expense";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.e2, l.u1}));
+    auto a = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                  FilterLedger::kTo, l.eq_currency, 1000, "", "", one);
+    auto b = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                  FilterLedger::kTo, l.eq_currency, 1000, "", "", f);
+    CHECK(b.has_total);
+    CHECK_EQ(b.total_count, 3LL);
+    CHECK_EQ(b.total_eq, a.total_eq);
+    CHECK_EQ(b.total_incomplete, a.total_incomplete);
+
+    // Варианты по И с остальными фильтрами; пагинация по ним — без пропусков и повторов.
+    f.wallet_uuids = {l.w_cash};
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e2}));
+    f = {};
+    f.qs = {"такси", "кафе", "кофе"};
+    CHECK(sorted_uuids(all_filtered_rows(*reports_db, l, f, 2)) == sorted({l.e1, l.e2, l.u1, l.e3, l.e4}));
+}
+
+// Разбор повторяемого q: пустые отбрасываются, один вариант — в q, несколько —
+// в qs, не больше 10, каждый не длиннее 100 символов.
+TEST(operations_filter_parse_q_variants) {
+    reports_repo::OperationsFilter f;
+    using V = std::vector<std::string>;
+
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", V{"", ""}, f).has_value());
+    CHECK(!f.any());
+
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", V{"", "такси"}, f).has_value());
+    CHECK_EQ(f.q, std::string("такси"));
+    CHECK(f.qs.empty());
+
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", V{"стриж", "barber"}, f).has_value());
+    CHECK(f.q.empty());
+    CHECK((f.qs == V{"стриж", "barber"}));
+    CHECK(f.any());
+
+    V ten(10, "x"), eleven(11, "x");
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", ten, f).has_value());
+    CHECK_EQ(f.qs.size(), static_cast<size_t>(10));
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", "", eleven, f).value_or(""),
+             std::string("q: не больше 10 значений"));
+
+    std::string cyr101;
+    for (int i = 0; i < 101; ++i) cyr101 += "ж";
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", "", V{"такси", cyr101}, f).value_or(""),
+             std::string("q: не длиннее 100 символов"));
+}
+
 // Пагинация по отфильтрованному набору: 3000 операций, 5 подходящих, limit 2 —
 // страницы 2, 2, 1, у последней has_more: false, каждая ровно один раз.
 // Две подходящие — с одной датой (порядок по (date, uuid)).

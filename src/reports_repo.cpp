@@ -529,6 +529,7 @@ namespace {
 
 constexpr std::size_t kMaxFilterUuids = 50;
 constexpr std::size_t kMaxQueryChars = 100;
+constexpr std::size_t kMaxQueryValues = 10; // вариантов q (search-text-variants)
 
 bool is_uuid_text(const std::string& s) {
     if (s.size() != 36) return false;
@@ -638,6 +639,17 @@ void append_filter_args(const OperationsFilter& filter, std::string& args, std::
         args += ", p_q => " + next();
         params.push_back(filter.q);
     }
+    // Варианты — отдельными $n в ARRAY[...], а не литералом '{...}': текст
+    // произвольный (запятые, кавычки, фигурные скобки), литерал массива
+    // пришлось бы экранировать, параметры — нет.
+    if (!filter.qs.empty()) {
+        std::string items;
+        for (const auto& v : filter.qs) {
+            items += (items.empty() ? "" : ", ") + next();
+            params.push_back(v);
+        }
+        args += ", p_qs => ARRAY[" + items + "]::text[]";
+    }
 }
 
 } // namespace
@@ -645,7 +657,8 @@ void append_filter_args(const OperationsFilter& filter, std::string& args, std::
 std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
                                                     const std::string& exclude_category_uuid,
                                                     const std::string& wallet_uuid,
-                                                    const std::string& kind, const std::string& q,
+                                                    const std::string& kind,
+                                                    const std::vector<std::string>& q_values,
                                                     OperationsFilter& out) {
     out = OperationsFilter{};
     if (auto err = parse_uuid_list("category_uuid", category_uuid, out.category_uuids)) return err;
@@ -662,11 +675,19 @@ std::optional<std::string> parse_operations_filter(const std::string& category_u
         return std::string("kind должен быть expense, income или transfer");
     }
     out.kind = kind;
-    if (!q.empty()) {
+    std::vector<std::string> qs;
+    for (const auto& q : q_values) {
+        if (q.empty()) continue;
         auto len = utf8_length(q);
         if (!len || *len > kMaxQueryChars) return std::string("q: не длиннее 100 символов");
+        qs.push_back(q);
     }
-    out.q = q;
+    if (qs.size() > kMaxQueryValues) return std::string("q: не больше 10 значений");
+    if (qs.size() == 1) {
+        out.q = qs[0];
+    } else {
+        out.qs = std::move(qs);
+    }
     return std::nullopt;
 }
 

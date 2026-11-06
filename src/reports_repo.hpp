@@ -306,10 +306,15 @@ struct OperationsFilter {
     std::vector<std::string> wallet_uuids;   // ИЛИ; операционная сторона, прямой перевод — по любому из двух
     std::string kind;                        // "", "expense", "income", "transfer"
     std::string q;                           // подстрока комментария, без регистра, ё = е, буквально
+    // Несколько вариантов подстроки (search-text-variants): комментарий
+    // подходит, если содержит ЛЮБОЙ из них. Один вариант идёт в q (p_q — тот же
+    // вызов, что до миграции wallet-api 000032), два и больше — сюда (p_qs).
+    // parse_operations_filter не заполняет q и qs одновременно.
+    std::vector<std::string> qs;
 
     bool any() const {
         return !category_uuids.empty() || !exclude_category_uuids.empty() || !wallet_uuids.empty() ||
-               !kind.empty() || !q.empty();
+               !kind.empty() || !q.empty() || !qs.empty();
     }
 };
 
@@ -318,11 +323,24 @@ struct OperationsFilter {
 // текст ошибки для 400 или nullopt, если всё в порядке (тогда out заполнен).
 // Тексты — дословно из spec «Проверка параметров фильтра»; порядок проверок:
 // category_uuid → exclude_category_uuid → оба вместе → wallet_uuid → kind → q.
+// q_values — все значения повторяемого параметра q по порядку; пустые
+// отбрасываются (пустое значение равносильно отсутствию).
 std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
                                                     const std::string& exclude_category_uuid,
                                                     const std::string& wallet_uuid,
-                                                    const std::string& kind, const std::string& q,
+                                                    const std::string& kind,
+                                                    const std::vector<std::string>& q_values,
                                                     OperationsFilter& out);
+
+// Один q — форма до search-text-variants (интеграционные тесты фильтров).
+inline std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                           const std::string& exclude_category_uuid,
+                                                           const std::string& wallet_uuid,
+                                                           const std::string& kind, const std::string& q,
+                                                           OperationsFilter& out) {
+    return parse_operations_filter(category_uuid, exclude_category_uuid, wallet_uuid, kind,
+                                   std::vector<std::string>{q}, out);
+}
 
 // Прежняя форма — без исключения (тесты фильтров до add-category-month-analytics).
 inline std::optional<std::string> parse_operations_filter(const std::string& category_uuid,

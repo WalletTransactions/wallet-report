@@ -431,11 +431,15 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
     // Фильтры — после курсора (design D2: прежние сценарии отвечают прежними
     // текстами) и до запроса ленты, чтобы ошибка ввода не стала 500 на
     // приведении ::uuid[] в Postgres.
+    // q повторяемый (search-text-variants): q=стриж&q=barber — комментарий
+    // с ЛЮБЫМ из вариантов. Один q — как раньше.
+    std::vector<std::string> q_values;
+    for (std::size_t i = 0; i < req.get_param_value_count("q"); ++i) q_values.push_back(req.get_param_value("q", i));
     reports_repo::OperationsFilter filter;
     if (auto err = reports_repo::parse_operations_filter(
             req.get_param_value("category_uuid"), req.get_param_value("exclude_category_uuid"),
             req.get_param_value("wallet_uuid"),
-            req.get_param_value("kind"), req.get_param_value("q"), filter)) {
+            req.get_param_value("kind"), q_values, filter)) {
         json_error(res, 400, *err);
         return;
     }
