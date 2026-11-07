@@ -11,7 +11,7 @@
 ## 2. Балансовые отчёты
 
 - [x] 2.1 `reports_repo`: `balance_to_date`, `balances_at_dates`, `balance_series` (обе ветки) выбирают `asset_type`/`include_in_net_worth` из функций и считают `total_eq`/`incomplete`, `capital_eq`/`capital_incomplete`, `net_worth_eq` агрегатами с `FILTER` (design D2); строки получают `asset_type` числом или `null`, `include_in_net_worth` настоящим bool. Проверка: новые интеграционные тесты — ликвидный кошелёк + актив (сценарий spec «Ликвидный кошелёк и актив»), актив с `include_in_net_worth = false`, актив без курса (`capital_incomplete` без `incomplete`), снятый признак актива; `balance_series_totals_only_matches_per_account_totals` расширен на три итога
-- [ ] 2.2 `reports.cpp` / `reports_repo.hpp`: новые поля в JSON трёх ответов. `openapi.yaml`: `BalanceReportRow` (`asset_type`, `include_in_net_worth`), `BalanceReport`, `BalanceAtDatesBlock`, `BalanceSeriesBucket` (`capital_eq`, `capital_incomplete`, `net_worth_eq`, новый смысл `total_eq`/`incomplete`); `README.md` — строка `/balance` в таблице эндпоинтов. Проверка: `/docs` на живом стеке показывает поля, curl `/api/reports/balance` через гейтвей возвращает три итога
+- [ ] 2.2 `reports.cpp` / `reports_repo.hpp`: новые поля в JSON трёх ответов. `openapi.yaml`: `BalanceReportRow` (`asset_type`, `include_in_net_worth`), `BalanceReport`, `BalanceAtDatesBlock`, `BalanceSeriesBucket` (`capital_eq`, `capital_incomplete`, `net_worth_eq`, новый смысл `total_eq`/`incomplete`); `README.md` — строка `/balance` в таблице эндпоинтов. Проверка: `/docs` на живом стеке показывает поля, curl `/api/reports/balance` через гейтвей возвращает три итога — Тест: [wallet-report#11](https://github.com/WalletTransactions/wallet-report/issues/11)
 
 ## 3. Лента, доход, расход, оборот
 
@@ -26,11 +26,11 @@
 ## 5. Отчёт «Капитал»
 
 - [x] 5.1 `reports_repo::assets_for_period` поверх `f_assets_for_period`: строки по каждому активу, итоги `invested_eq`/`revaluation_total_eq`/`revaluation_period_eq`/`value_eq` и `incomplete` оконными агрегатами, `return_pct` через `format_pct` (design D4). Проверка: интеграционные тесты по сценариям spec `capital-report` — покупка + ремонт, продажа, переоценка до и внутри периода, актив без движения, ничего не вложено (`return_pct: null`), нет курса (`incomplete`), обычный кошелёк не попадает, порядок по `value_eq` убыв.
-- [ ] 5.2 `GET /api/reports/assets` в `reports.cpp`: параметры и ошибки как у `/wallet-turnover`, нет леджера — `200` и пустой список. `openapi.yaml`: путь с `operationId: reportAssets`, схемы `AssetsReport`/`AssetRow`; `README.md` — строка в таблице эндпоинтов. Проверка: curl через гейтвей на живом стеке — `200` с данными, `400` без `from`/`eq_currency`, `401` без сессии; `/docs` показывает ручку
+- [ ] 5.2 `GET /api/reports/assets` в `reports.cpp`: параметры и ошибки как у `/wallet-turnover`, нет леджера — `200` и пустой список. `openapi.yaml`: путь с `operationId: reportAssets`, схемы `AssetsReport`/`AssetRow`; `README.md` — строка в таблице эндпоинтов. Проверка: curl через гейтвей на живом стеке — `200` с данными, `400` без `from`/`eq_currency`, `401` без сессии; `/docs` показывает ручку — Тест: [wallet-report#11](https://github.com/WalletTransactions/wallet-report/issues/11)
 
 ## 6. Интеграционная проверка
 
-- [ ] 6.1 На стеке с миграцией wallet-api и засеянным активом (перевод, ремонт, переоценка вверх, износ) сверить вручную: `capital_eq` из `/balance` на дату после конца периода равен итоговому `value_eq` из `/assets`; `/income` и `/expense` за период совпадают с ответами до засева переоценки. Проверка: результаты сверки записаны в PR
+- [ ] 6.1 На стеке с миграцией wallet-api и засеянным активом (перевод, ремонт, переоценка вверх, износ) сверить вручную: `capital_eq` из `/balance` на дату после конца периода равен итоговому `value_eq` из `/assets`; `/income` и `/expense` за период совпадают с ответами до засева переоценки. Проверка: результаты сверки записаны в PR — Тест: [wallet-report#11](https://github.com/WalletTransactions/wallet-report/issues/11)
 
 Статус реализации (2026-11-07): код, `openapi.yaml` (redocly lint чистый) и README для 2.2 и 5.2 готовы, 61/61 интеграционных тестов зелёные на базе с миграцией wallet-api `000033`; открыты только живые проверки 2.2, 5.2, 6.1 — после выката на test. Сверх задач: `kind=revaluation` принимается фильтром `/operations` (design, Risks — `add-operations-filters` уже влит).
 
