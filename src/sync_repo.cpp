@@ -11,6 +11,8 @@ const std::vector<TableSpec>& push_tables() {
     static const std::vector<TableSpec> tables = {
         {"account", Scope::LedgerOnly, {"name", "comment", "icon_uuid", "is_archived", "system_kind", "kind"}},
         {"account_operating", Scope::LedgerOnly, {"currency_uuid"}},
+        // capital-assets — ровно как в wallet-api/src/sync_repo.cpp.
+        {"account_asset", Scope::LedgerOnly, {"asset_type", "include_in_net_worth", "comment"}},
         {"operation", Scope::LedgerOnly,
          {"date", "acc_fr_uuid", "acc_to_uuid", "amount", "comment"}, {"amount"}},
         {"operation_link", Scope::LedgerOnly, {"main_uuid", "link_uuid", "type"}},
@@ -67,7 +69,7 @@ const TableSpec* find_spec(const std::vector<TableSpec>& tables, const std::stri
 // зависимости одни и те же в обе стороны.
 constexpr const char* kApplyOrder[] = {
     "icon", "currency", "currency_pair", "currency_pair_rate", "currency_conversion",
-    "account", "account_operating", "operation", "operation_link",
+    "account", "account_operating", "account_asset", "operation", "operation_link",
 };
 
 // JSON -> текстовый параметр SQL. Суммы/курсы приходят СТРОКАМИ уже на

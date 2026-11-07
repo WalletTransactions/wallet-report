@@ -1441,7 +1441,7 @@ TEST(operations_filter_parse_rejects_bad_input_with_exact_texts) {
              std::string("category_uuid: не больше 50 значений"));
 
     CHECK_EQ(reports_repo::parse_operations_filter("", "", "Expense", "", f).value_or(""),
-             std::string("kind должен быть expense, income или transfer"));
+             std::string("kind должен быть expense, income, transfer или revaluation"));
     for (const char* k : {"expense", "income", "transfer"}) {
         CHECK(!reports_repo::parse_operations_filter("", "", k, "", f).has_value());
     }
@@ -2090,6 +2090,12 @@ TEST(balance_series_totals_only_matches_per_account_totals) {
         {"account_operating", json::array({account_operating_row(wallet_a, cur_eq),
                                             account_operating_row(wallet_b, cur_eq),
                                             account_operating_row(wallet_unpriced, cur_no_rate)})},
+        // capital-assets: B — актив вне чистого капитала, чтобы все три итога
+        // ветки «только итоги» сверялись с детализацией не нулями.
+        {"account_asset", json::array({json{{"uuid", wallet_b},
+                                             {"asset_type", 2},
+                                             {"include_in_net_worth", false},
+                                             {"comment", ""}}})},
         {"operation", json::array({
              operation_row(uuidgen::v4(), "2027-03-02T10:00:00", category_uuid, wallet_a, "40.00"),
              operation_row(uuidgen::v4(), "2027-03-02T11:00:00", category_uuid, wallet_b, "2.50"),
@@ -2120,10 +2126,17 @@ TEST(balance_series_totals_only_matches_per_account_totals) {
                  detailed.buckets[i].at("total_eq").get<std::string>());
         CHECK_EQ(totals.buckets[i].at("incomplete").get<bool>(),
                  detailed.buckets[i].at("incomplete").get<bool>());
+        for (const char* k : {"capital_eq", "net_worth_eq"}) {
+            CHECK_EQ(totals.buckets[i].at(k).get<std::string>(), detailed.buckets[i].at(k).get<std::string>());
+        }
+        CHECK_EQ(totals.buckets[i].at("capital_incomplete").get<bool>(),
+                 detailed.buckets[i].at("capital_incomplete").get<bool>());
     }
     CHECK_EQ(totals.buckets[0].at("total_eq").get<std::string>(), std::string("0")); // до первой операции
     CHECK(!totals.buckets[0].at("incomplete").get<bool>());
-    CHECK_EQ(totals.buckets[1].at("total_eq").get<std::string>(), std::string("42.50"));
+    CHECK_EQ(totals.buckets[1].at("total_eq").get<std::string>(), std::string("40.00")); // B — актив
+    CHECK_EQ(totals.buckets[1].at("capital_eq").get<std::string>(), std::string("2.50"));
+    CHECK_EQ(totals.buckets[1].at("net_worth_eq").get<std::string>(), std::string("40.00"));
     CHECK(!totals.buckets[1].at("incomplete").get<bool>());
     CHECK(totals.buckets[2].at("incomplete").get<bool>()); // wallet_unpriced — курса к нему нет
 }
@@ -2339,10 +2352,14 @@ TEST(list_accounts_splits_by_account_operating_and_filters_archived) {
     CHECK_EQ(w.at("icon_sha256").get<std::string>(), icon.sha256_hex);
     CHECK_EQ(w.at("system_kind").get<int>(), 0);
     CHECK(!w.at("is_archived").get<bool>());
+    CHECK(w.at("asset_type").is_null()); // capital-assets: ликвидный кошелёк
+    CHECK(w.at("include_in_net_worth") == json(true));
     const auto& c = all.accounts[1];
     CHECK_EQ(c.at("uuid").get<std::string>(), category);
     CHECK_EQ(c.at("kind").get<std::string>(), std::string("category"));
     CHECK_EQ(c.at("currency_uuid").get<std::string>(), std::string(""));
+    CHECK(c.at("asset_type").is_null());
+    CHECK(c.at("include_in_net_worth").is_null());
 
     auto wallets = reports_repo::list_accounts(*reports_db, identity.ledger_id,
                                                reports_repo::AccountKindFilter::Wallet, false);
@@ -2682,4 +2699,414 @@ TEST(operations_filter_exclude_parse_texts) {
     CHECK(f.any());
     CHECK_EQ(f.exclude_category_uuids.size(), static_cast<size_t>(1));
     CHECK(f.category_uuids.empty());
+}
+
+// ---- capital-assets: активы, переоценка, отчёт «Капитал» ------------------
+// Сценарии specs/* change capital-assets. Один леджер в одной валюте (она же
+// эквивалент), суммы — числа из spec:
+//   2026-01-10 Зарплата → Карта     20 000 000  (доход)
+//   2026-02-01 Карта → Квартира     10 000 000  (покупка — перевод)
+//   2026-03-01 Карта → Квартира      1 500 000  (ремонт — перевод)
+//   2026-03-15 Переоценка → Квартира 2 000 000  (переоценка вверх, до периода)
+//   2026-04-01 Карта → Машина        1 000 000  (покупка — перевод)
+//   2026-05-01 Квартира → Переоценка   500 000  (переоценка вниз, в периоде)
+//   2026-05-02 Карта → Продукты         10 000  (расход, суббота)
+//   2026-06-01 Машина → Переоценка     300 000  (износ, в периоде)
+// Квартира — asset_type 1, Машина — asset_type 2 и include_in_net_worth = false.
+
+namespace {
+
+json asset_row(const std::string& wallet_uuid, int asset_type, bool include_in_net_worth = true) {
+    return json{{"uuid", wallet_uuid},
+                {"asset_type", asset_type},
+                {"include_in_net_worth", include_in_net_worth},
+                {"comment", ""}};
+}
+
+json system_account_row(const std::string& uuid, const std::string& icon_uuid, const std::string& name,
+                        int system_kind) {
+    json row = account_row(uuid, icon_uuid, name);
+    row["system_kind"] = system_kind;
+    return row;
+}
+
+struct CapitalLedger {
+    fixture::TestIdentity identity;
+    std::string icon, cur, iso, eq;
+    std::string card = uuidgen::v4(), flat = uuidgen::v4(), car = uuidgen::v4();
+    std::string food = uuidgen::v4(), salary = uuidgen::v4(), reval = uuidgen::v4();
+    std::string op_reval_up = uuidgen::v4(), op_reval_down = uuidgen::v4(), op_wear = uuidgen::v4();
+    std::string op_buy = uuidgen::v4();
+};
+
+CapitalLedger seed_capital_ledger(db::Database& db, db::Database& reports_db) {
+    CapitalLedger l;
+    l.identity = fixture::make_identity(db);
+    l.icon = fixture::make_reference_icon(db);
+    l.cur = uuidgen::v4();
+    l.iso = "CA" + uuidgen::v4().substr(0, 1);
+    json changes = {
+        {"currency", json::array({currency_row(l.cur, l.icon, l.iso)})},
+        {"account", json::array({account_row(l.card, l.icon, "Карта " + l.card),
+                                  account_row(l.flat, l.icon, "Квартира " + l.flat),
+                                  account_row(l.car, l.icon, "Машина " + l.car),
+                                  account_row(l.food, l.icon, "Продукты " + l.food),
+                                  account_row(l.salary, l.icon, "Зарплата " + l.salary),
+                                  system_account_row(l.reval, l.icon, "Переоценка " + l.reval, 3)})},
+        {"account_operating", json::array({account_operating_row(l.card, l.cur),
+                                            account_operating_row(l.flat, l.cur),
+                                            account_operating_row(l.car, l.cur)})},
+        {"account_asset", json::array({asset_row(l.flat, 1), asset_row(l.car, 2, false)})},
+        {"operation", json::array({
+             operation_row(uuidgen::v4(), "2026-01-10T10:00:00", l.salary, l.card, "20000000.00"),
+             operation_row(l.op_buy, "2026-02-01T10:00:00", l.card, l.flat, "10000000.00"),
+             operation_row(uuidgen::v4(), "2026-03-01T10:00:00", l.card, l.flat, "1500000.00"),
+             operation_row(l.op_reval_up, "2026-03-15T10:00:00", l.reval, l.flat, "2000000.00"),
+             operation_row(uuidgen::v4(), "2026-04-01T10:00:00", l.card, l.car, "1000000.00"),
+             operation_row(l.op_reval_down, "2026-05-01T10:00:00", l.flat, l.reval, "500000.00"),
+             operation_row(uuidgen::v4(), "2026-05-02T10:00:00", l.card, l.food, "10000.00"),
+             operation_row(l.op_wear, "2026-06-01T10:00:00", l.car, l.reval, "300000.00"),
+         })},
+    };
+    auto push = sync_repo::push_batch(db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+    auto eq = reports_repo::resolve_eq_currency(reports_db, l.iso, l.identity.ledger_id);
+    REQUIRE(eq.has_value());
+    l.eq = *eq;
+    return l;
+}
+
+const json* find_by(const json& rows, const std::string& key, const std::string& uuid) {
+    for (const auto& r : rows) {
+        if (r.at(key).get<std::string>() == uuid) return &r;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST(seed_asset_and_revaluation_category_via_push) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+    auto res = reports_db->exec(
+        "SELECT (SELECT count(*) FROM account_asset WHERE ledger_id = $1 AND deleted_at IS NULL), "
+        "(SELECT system_kind FROM account WHERE ledger_id = $1 AND uuid = $2)",
+        {l.identity.ledger_id, l.reval});
+    CHECK_EQ(res.rows.at(0).fields.at(0), std::string("2"));
+    CHECK_EQ(res.rows.at(0).fields.at(1), std::string("3"));
+}
+
+TEST(balance_splits_liquid_capital_and_net_worth) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto r = reports_repo::balance_to_date(*reports_db, l.identity.ledger_id, "2027-01-01", l.eq);
+    CHECK_EQ(r.total_eq, std::string("7490000.00"));      // только Карта
+    CHECK_EQ(r.capital_eq, std::string("13700000.00"));   // Квартира 13 000 000 + Машина 700 000
+    CHECK_EQ(r.net_worth_eq, std::string("20490000.00")); // Машина вне чистого капитала
+    CHECK(!r.incomplete);
+    CHECK(!r.capital_incomplete);
+
+    const json* flat = find_by(r.rows, "account_uuid", l.flat);
+    const json* car = find_by(r.rows, "account_uuid", l.car);
+    const json* card = find_by(r.rows, "account_uuid", l.card);
+    REQUIRE(flat && car && card);
+    CHECK(flat->at("asset_type") == json(1));
+    CHECK(flat->at("include_in_net_worth") == json(true));
+    CHECK(car->at("asset_type") == json(2));
+    CHECK(car->at("include_in_net_worth") == json(false));
+    CHECK(card->at("asset_type").is_null());
+    CHECK(card->at("include_in_net_worth") == json(true));
+
+    // Те же итоги в блоке /balance-at-dates и в бакете /balance-series (обе ветки).
+    auto at = reports_repo::balances_at_dates(*reports_db, l.identity.ledger_id, {"2027-01-01"}, l.eq);
+    REQUIRE(at.dates.size() == static_cast<size_t>(1));
+    CHECK_EQ(at.dates[0].at("total_eq").get<std::string>(), std::string("7490000.00"));
+    CHECK_EQ(at.dates[0].at("capital_eq").get<std::string>(), std::string("13700000.00"));
+    CHECK_EQ(at.dates[0].at("net_worth_eq").get<std::string>(), std::string("20490000.00"));
+    const json* at_flat = find_by(at.dates[0].at("accounts"), "account_uuid", l.flat);
+    REQUIRE(at_flat != nullptr);
+    CHECK(at_flat->at("asset_type") == json(1));
+
+    for (bool with_accounts : {true, false}) {
+        auto s = reports_repo::balance_series(*reports_db, l.identity.ledger_id, "2026-12-01", "2026-12-31",
+                                              "month", l.eq, with_accounts);
+        REQUIRE(s.buckets.size() == static_cast<size_t>(1));
+        CHECK_EQ(s.buckets[0].at("total_eq").get<std::string>(), std::string("7490000.00"));
+        CHECK_EQ(s.buckets[0].at("capital_eq").get<std::string>(), std::string("13700000.00"));
+        CHECK_EQ(s.buckets[0].at("net_worth_eq").get<std::string>(), std::string("20490000.00"));
+        CHECK(!s.buckets[0].at("capital_incomplete").get<bool>());
+    }
+}
+
+TEST(balance_asset_without_rate_marks_only_capital_incomplete) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+    std::string icon = fixture::make_reference_icon(*db);
+    std::string cur = uuidgen::v4(), cur_no_rate = uuidgen::v4();
+    std::string iso = "CB" + uuidgen::v4().substr(0, 1), iso_nr = "CN" + uuidgen::v4().substr(0, 1);
+    std::string card = uuidgen::v4(), house = uuidgen::v4(), income = uuidgen::v4();
+    json changes = {
+        {"currency", json::array({currency_row(cur, icon, iso), currency_row(cur_no_rate, icon, iso_nr)})},
+        {"account", json::array({account_row(card, icon, "Card " + card), account_row(house, icon, "House " + house),
+                                  account_row(income, icon, "Inc " + income)})},
+        {"account_operating",
+         json::array({account_operating_row(card, cur), account_operating_row(house, cur_no_rate)})},
+        {"account_asset", json::array({asset_row(house, 1)})},
+        {"operation", json::array({operation_row(uuidgen::v4(), "2026-01-10T10:00:00", income, card, "100000.00"),
+                                    operation_row(uuidgen::v4(), "2026-01-11T10:00:00", income, house, "5000000.00")})},
+    };
+    REQUIRE(sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(), changes).http_status ==
+            200);
+    auto eq = reports_repo::resolve_eq_currency(*reports_db, iso, identity.ledger_id);
+    REQUIRE(eq.has_value());
+
+    auto r = reports_repo::balance_to_date(*reports_db, identity.ledger_id, "2027-01-01", *eq);
+    CHECK_EQ(r.total_eq, std::string("100000.00"));
+    CHECK(!r.incomplete);
+    CHECK(r.capital_incomplete);
+    CHECK_EQ(r.capital_eq, std::string("0"));
+
+    auto a = reports_repo::assets_for_period(*reports_db, identity.ledger_id, "2026-01-01", "2026-12-31 23:59:59", *eq);
+    REQUIRE(a.rows.size() == static_cast<size_t>(1));
+    CHECK(a.incomplete);
+    CHECK_EQ(a.rows[0].at("value").get<std::string>(), std::string("5000000.00"));
+    CHECK(a.rows[0].at("value_eq").is_null());
+    CHECK(a.rows[0].at("invested_eq").is_null());
+}
+
+TEST(balance_unmarked_asset_returns_to_liquid_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+    json tombstone = asset_row(l.car, 2, false);
+    tombstone["deleted"] = true;
+    REQUIRE(sync_repo::push_batch(*db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(),
+                                  {{"account_asset", json::array({tombstone})}})
+                .http_status == 200);
+
+    auto r = reports_repo::balance_to_date(*reports_db, l.identity.ledger_id, "2027-01-01", l.eq);
+    CHECK_EQ(r.total_eq, std::string("8190000.00")); // Карта + Машина
+    CHECK_EQ(r.capital_eq, std::string("13000000.00"));
+    const json* car = find_by(r.rows, "account_uuid", l.car);
+    REQUIRE(car != nullptr);
+    CHECK(car->at("asset_type").is_null());
+    CHECK_EQ(car->at("balance").get<std::string>(), std::string("700000.00")); // баланс не тронут
+}
+
+TEST(operations_for_period_classifies_revaluation) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto ops = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, "2026-01-01",
+                                                   "2026-12-31 23:59:59", l.eq, 100, "", "");
+    const json* up = find_by(ops.rows, "operation_uuid", l.op_reval_up);
+    const json* down = find_by(ops.rows, "operation_uuid", l.op_wear);
+    const json* buy = find_by(ops.rows, "operation_uuid", l.op_buy);
+    REQUIRE(up && down && buy);
+    CHECK_EQ(up->at("kind").get<std::string>(), std::string("revaluation"));
+    CHECK_EQ(up->at("category_uuid").get<std::string>(), l.reval);
+    CHECK_EQ(up->at("wallet_uuid").get<std::string>(), l.flat);
+    CHECK_EQ(up->at("to_uuid").get<std::string>(), l.flat);
+    CHECK_EQ(down->at("kind").get<std::string>(), std::string("revaluation"));
+    CHECK_EQ(down->at("from_uuid").get<std::string>(), l.car);
+    CHECK_EQ(down->at("wallet_uuid").get<std::string>(), l.car);
+    CHECK_EQ(buy->at("kind").get<std::string>(), std::string("transfer"));
+
+    reports_repo::OperationsFilter f;
+    f.kind = "revaluation";
+    auto only = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, "2026-01-01",
+                                                    "2026-12-31 23:59:59", l.eq, 100, "", "", f);
+    CHECK_EQ(only.rows.size(), static_cast<size_t>(3));
+}
+
+TEST(income_and_expense_exclude_revaluation) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+    const std::string from = "2026-01-01", to = "2026-12-31 23:59:59";
+
+    auto inc = reports_repo::income_for_period(*reports_db, l.identity.ledger_id, from, to, l.eq);
+    REQUIRE(inc.rows.size() == static_cast<size_t>(1));
+    CHECK_EQ(inc.rows[0].at("account_uuid").get<std::string>(), l.salary);
+    CHECK_EQ(inc.total_eq, std::string("20000000.00"));
+
+    auto exp = reports_repo::expense_for_period(*reports_db, l.identity.ledger_id, from, to, l.eq);
+    REQUIRE(exp.rows.size() == static_cast<size_t>(1));
+    CHECK_EQ(exp.rows[0].at("account_uuid").get<std::string>(), l.food);
+    CHECK_EQ(exp.total_eq, std::string("10000.00"));
+}
+
+TEST(income_expense_by_month_and_weekday_exclude_revaluation) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto m = reports_repo::income_expense_by_month(*reports_db, l.identity.ledger_id, "2026-01-01",
+                                                   "2026-06-30 23:59:59", l.eq);
+    REQUIRE(m.months.size() == static_cast<size_t>(6));
+    CHECK_EQ(m.months[2].at("income_eq").get<std::string>(), std::string("0.00"));  // март: переоценка +2 000 000
+    CHECK_EQ(m.months[4].at("expense_eq").get<std::string>(), std::string("10000.00")); // май: только Продукты
+    CHECK_EQ(m.months[5].at("expense_eq").get<std::string>(), std::string("0.00"));     // июнь: только износ
+
+    auto w = reports_repo::expense_by_weekday(*reports_db, l.identity.ledger_id, "2026-01-01",
+                                              "2026-12-31 23:59:59", l.eq);
+    REQUIRE(w.days.size() == static_cast<size_t>(7));
+    for (const auto& d : w.days) {
+        std::string expected = d.at("isodow").get<int>() == 6 ? "10000.00" : "0.00"; // 2026-05-02 — суббота
+        CHECK_EQ(d.at("expense_eq").get<std::string>(), expected);
+    }
+}
+
+TEST(expense_structure_and_biggest_moves_exclude_revaluation) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto s = reports_repo::expense_structure_for_period(*reports_db, l.identity.ledger_id, "2026-05-01",
+                                                        "2026-06-30 23:59:59", l.eq, std::nullopt, std::nullopt);
+    REQUIRE(s.categories.size() == static_cast<size_t>(1));
+    CHECK_EQ(s.categories[0].at("account_uuid").get<std::string>(), l.food);
+    CHECK(s.categories[0].at("pct") == json("100.0")); // износ машины в долю не входит
+
+    auto mv = reports_repo::expense_biggest_moves(*reports_db, l.identity.ledger_id, "2026-05-01",
+                                                  "2026-06-30 23:59:59", "2026-03-01", "2026-04-30 23:59:59", l.eq, 10);
+    for (const auto& r : mv.rows) CHECK(r.at("account_uuid").get<std::string>() != l.reval);
+    CHECK_EQ(mv.rows.size(), static_cast<size_t>(1));
+}
+
+TEST(wallet_turnover_excludes_revaluation_and_marks_asset) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto t = reports_repo::wallet_turnover_for_period(*reports_db, l.identity.ledger_id, "2026-01-01",
+                                                      "2026-12-31 23:59:59", l.eq);
+    const json* flat = find_by(t.rows, "account_uuid", l.flat);
+    const json* car = find_by(t.rows, "account_uuid", l.car);
+    const json* card = find_by(t.rows, "account_uuid", l.card);
+    REQUIRE(flat && car && card);
+    CHECK_EQ(flat->at("turnover_in").get<std::string>(), std::string("11500000.00")); // без переоценки +2 000 000
+    CHECK_EQ(flat->at("turnover_out").get<std::string>(), std::string("0.00"));       // без переоценки −500 000
+    CHECK_EQ(car->at("turnover_out").get<std::string>(), std::string("0.00"));        // без износа
+    CHECK(flat->at("asset_type") == json(1));
+    CHECK(car->at("asset_type") == json(2));
+    CHECK(card->at("asset_type").is_null());
+}
+
+TEST(list_accounts_marks_assets) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto a = reports_repo::list_accounts(*reports_db, l.identity.ledger_id, reports_repo::AccountKindFilter::Any, false);
+    const json* flat = find_by(a.accounts, "uuid", l.flat);
+    const json* car = find_by(a.accounts, "uuid", l.car);
+    const json* card = find_by(a.accounts, "uuid", l.card);
+    const json* reval = find_by(a.accounts, "uuid", l.reval);
+    REQUIRE(flat && car && card && reval);
+    CHECK_EQ(flat->at("kind").get<std::string>(), std::string("wallet"));
+    CHECK(flat->at("asset_type") == json(1));
+    CHECK(car->at("include_in_net_worth") == json(false));
+    CHECK(card->at("asset_type").is_null());
+    CHECK(card->at("include_in_net_worth") == json(true));
+    CHECK_EQ(reval->at("kind").get<std::string>(), std::string("category"));
+    CHECK(reval->at("system_kind") == json(3));
+    CHECK(reval->at("asset_type").is_null());
+    CHECK(reval->at("include_in_net_worth").is_null());
+}
+
+TEST(assets_for_period_invested_revaluation_value_and_return) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+
+    auto a = reports_repo::assets_for_period(*reports_db, l.identity.ledger_id, "2026-04-01", "2026-12-31 23:59:59", l.eq);
+    REQUIRE(a.rows.size() == static_cast<size_t>(2)); // Карта — не актив
+    // Порядок — по оценке в эквиваленте убыв.
+    CHECK_EQ(a.rows[0].at("account_uuid").get<std::string>(), l.flat);
+    CHECK_EQ(a.rows[1].at("account_uuid").get<std::string>(), l.car);
+
+    const json& flat = a.rows[0];
+    CHECK_EQ(flat.at("invested").get<std::string>(), std::string("11500000.00"));
+    CHECK_EQ(flat.at("revaluation_total").get<std::string>(), std::string("1500000.00"));
+    CHECK_EQ(flat.at("revaluation_period").get<std::string>(), std::string("-500000.00"));
+    CHECK_EQ(flat.at("value").get<std::string>(), std::string("13000000.00"));
+    CHECK(flat.at("return_pct") == json("13.0"));
+    CHECK(flat.at("asset_type") == json(1));
+
+    const json& car = a.rows[1];
+    CHECK_EQ(car.at("invested").get<std::string>(), std::string("1000000.00"));
+    CHECK_EQ(car.at("value").get<std::string>(), std::string("700000.00"));
+    CHECK(car.at("return_pct") == json("-30.0"));
+    CHECK(car.at("include_in_net_worth") == json(false));
+
+    CHECK_EQ(a.value_eq, std::string("13700000.00"));
+    CHECK_EQ(a.invested_eq, std::string("12500000.00"));
+    CHECK_EQ(a.revaluation_total_eq, std::string("1200000.00"));
+    CHECK_EQ(a.revaluation_period_eq, std::string("-800000.00"));
+    CHECK(!a.incomplete);
+
+    // Оценка на конец отчёта = capital_eq остатков на следующий день.
+    auto b = reports_repo::balance_to_date(*reports_db, l.identity.ledger_id, "2027-01-01", l.eq);
+    CHECK_EQ(b.capital_eq, a.value_eq);
+}
+
+TEST(assets_for_period_sale_idle_asset_and_nothing_invested) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_capital_ledger(*db, *reports_db);
+    std::string idle = uuidgen::v4();
+    json idle_account = account_row(idle, l.icon, "Гараж " + idle);
+    json changes = {
+        {"account", json::array({idle_account})},
+        {"account_operating", json::array({account_operating_row(idle, l.cur)})},
+        {"account_asset", json::array({asset_row(idle, 3)})},
+        // Продажа части квартиры и полный вывод машины.
+        {"operation", json::array({operation_row(uuidgen::v4(), "2026-07-01T10:00:00", l.flat, l.card, "3000000.00"),
+                                    operation_row(uuidgen::v4(), "2026-07-02T10:00:00", l.car, l.card, "700000.00")})},
+    };
+    REQUIRE(sync_repo::push_batch(*db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes)
+                .http_status == 200);
+
+    auto a = reports_repo::assets_for_period(*reports_db, l.identity.ledger_id, "2026-04-01", "2026-12-31 23:59:59", l.eq);
+    REQUIRE(a.rows.size() == static_cast<size_t>(3));
+    const json* flat = find_by(a.rows, "account_uuid", l.flat);
+    const json* car = find_by(a.rows, "account_uuid", l.car);
+    const json* garage = find_by(a.rows, "account_uuid", idle);
+    REQUIRE(flat && car && garage);
+    CHECK_EQ(flat->at("invested").get<std::string>(), std::string("8500000.00")); // 11 500 000 − 3 000 000
+    // Машина выведена целиком: оценка 0, переоценка −300 000 (износ), значит
+    // invested = value − revaluation_total = 0 − (−300 000) = 300 000 —
+    // столько из вложенного «съел» износ.
+    CHECK_EQ(car->at("value").get<std::string>(), std::string("0.00"));
+    CHECK_EQ(car->at("invested").get<std::string>(), std::string("300000.00"));
+    // Актив без движения — нули в точности валюты и пустая доходность.
+    CHECK_EQ(garage->at("value").get<std::string>(), std::string("0.00"));
+    CHECK_EQ(garage->at("invested").get<std::string>(), std::string("0.00"));
+    CHECK_EQ(garage->at("revaluation_total").get<std::string>(), std::string("0.00"));
+    CHECK(garage->at("return_pct").is_null());
+}
+
+TEST(assets_for_period_without_ledger_assets_is_empty) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+    std::string icon = fixture::make_reference_icon(*db);
+    std::string cur = uuidgen::v4(), iso = "CE" + uuidgen::v4().substr(0, 1), card = uuidgen::v4();
+    json changes = {{"currency", json::array({currency_row(cur, icon, iso)})},
+                    {"account", json::array({account_row(card, icon, "Card " + card)})},
+                    {"account_operating", json::array({account_operating_row(card, cur)})}};
+    REQUIRE(sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(), changes).http_status ==
+            200);
+    auto eq = reports_repo::resolve_eq_currency(*reports_db, iso, identity.ledger_id);
+    REQUIRE(eq.has_value());
+    auto a = reports_repo::assets_for_period(*reports_db, identity.ledger_id, "2026-01-01", "2026-12-31", *eq);
+    CHECK(a.rows.empty());
+    CHECK_EQ(a.value_eq, std::string("0"));
+    CHECK(!a.incomplete);
 }

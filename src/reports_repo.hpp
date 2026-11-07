@@ -70,10 +70,12 @@ CurrenciesResult list_currencies(db::Database& db, const std::string& ledger_id)
 enum class AccountKindFilter { Any, Wallet, Category };
 
 struct AccountsResult {
-    // {uuid, name, kind ("wallet"/"category"), system_kind (число 0/1/2),
-    // is_archived (bool), icon_sha256, currency_uuid, iso_code, symbol,
-    // precision}, ORDER BY kind (кошельки первыми), name. Валютные поля —
-    // пустые строки у категорий (SQL NULL, см. db.hpp).
+    // {uuid, name, kind ("wallet"/"category"), system_kind (число 0/1/2/3,
+    // 3 — «Переоценка»), is_archived (bool), icon_sha256, currency_uuid,
+    // iso_code, symbol, precision, asset_type (число 1/2/3 или null),
+    // include_in_net_worth (bool у кошелька, null у категории)}, ORDER BY
+    // kind (кошельки первыми), name. Валютные поля — пустые строки у
+    // категорий (SQL NULL, см. db.hpp).
     nlohmann::json accounts = nlohmann::json::array();
 };
 
@@ -90,10 +92,24 @@ struct ReportResult {
     bool incomplete = false;
 };
 
+// Итоги остатков (change capital-assets, design D2): total_eq/incomplete
+// (в ReportResult и блоках) — только ЛИКВИДНЫЕ кошельки (asset_type IS
+// NULL); capital_eq/capital_incomplete — активы; net_worth_eq — ликвидные
+// плюс активы с include_in_net_worth. Как и total_eq, в суммы входят только
+// пересчитанные в эквивалент кошельки.
+struct BalanceResult : ReportResult {
+    std::string capital_eq = "0";
+    bool capital_incomplete = false;
+    std::string net_worth_eq = "0";
+};
+
 // Баланс каждого кошелька леджера на дату — обёртка над f_balance_to_date
-// (wallet-api/schema/function/f_balance_to_date.sql) с агрегатом (sum/incomplete
-// по всему результату через `OVER ()`, без второго похода в базу).
-ReportResult balance_to_date(db::Database& db, const std::string& ledger_id,
+// (wallet-api/schema/function/f_balance_to_date.sql) с агрегатами (итоги
+// BalanceResult по всему результату через `OVER ()`, без второго похода в
+// базу). Строка: {account_uuid, account_name, currency_uuid, symbol,
+// precision, balance, balance_eq, asset_type (число 1/2/3 или null),
+// include_in_net_worth (bool, у ликвидного true)}.
+BalanceResult balance_to_date(db::Database& db, const std::string& ledger_id,
                               const std::string& date, const std::string& eq_currency_uuid);
 
 // Доход за период с разбивкой по счёту — обёртка над f_income_for_period.
@@ -401,7 +417,9 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
 struct WalletTurnoverResult {
     // {account_uuid, account_name, comment, is_archived, currency_uuid,
     // symbol, precision, icon_sha256, turnover_in, turnover_out,
-    // turnover_in_eq, turnover_out_eq}, ORDER BY account_name. is_archived —
+    // turnover_in_eq, turnover_out_eq, asset_type (число или null —
+    // capital-assets)}, ORDER BY account_name. Переоценка в оборот не входит
+    // (f_wallet_turnover_for_period). is_archived —
     // настоящий JSON boolean (не строка "t"/"f", как остальные текстовые поля
     // этой структуры) — тот же приём, что incomplete у ReportResult, только
     // он вычислен на уровне отдельной строки, а не всего результата.
@@ -440,7 +458,9 @@ struct BalancesAtDatesResult {
     //
     // accounts — то же самое, что ReportResult.rows у balance_to_date
     // ({account_uuid, account_name, currency_uuid, symbol, precision,
-    // balance, balance_eq}).
+    // balance, balance_eq, asset_type, include_in_net_worth}); у блока те же
+    // итоги, что у BalanceResult (total_eq, incomplete, capital_eq,
+    // capital_incomplete, net_worth_eq).
     nlohmann::json dates = nlohmann::json::array();
 };
 
@@ -470,6 +490,8 @@ struct BalanceSeriesResult {
     // от balances_at_dates, длина этого списка сервером НЕ переспрашивается
     // у вызывающего — она следует из date_index, который f_balance_series
     // возвращает уже для КАЖДОГО бакета (включая пустые, см. её LEFT JOIN).
+    // Итоги бакета — как у BalanceResult (capital-assets): total_eq,
+    // incomplete, capital_eq, capital_incomplete, net_worth_eq.
     nlohmann::json buckets = nlohmann::json::array();
 };
 
@@ -488,6 +510,30 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
                                     const std::string& from, const std::string& to,
                                     const std::string& step, const std::string& eq_currency_uuid,
                                     bool with_accounts);
+
+// Отчёт «Капитал» (GET /api/reports/assets, change capital-assets, design
+// D4) — обёртка над f_assets_for_period (wallet-api): строка на каждый
+// живой актив, включая архивные и проданные, ORDER BY value_eq DESC NULLS
+// LAST. Строка: {account_uuid, account_name, is_archived (bool),
+// icon_sha256, asset_type (число), include_in_net_worth (bool),
+// currency_uuid, symbol, precision, invested, revaluation_total,
+// revaluation_period, value, invested_eq, revaluation_total_eq,
+// revaluation_period_eq, value_eq, return_pct}. Суммы — строками в точности
+// валюты; *_eq — пустая строка (null в JSON) без курса; return_pct — один
+// знак (format_pct) или null при invested <= 0.
+struct AssetsResult {
+    nlohmann::json rows = nlohmann::json::array();
+    // Итоги в эквиваленте по пересчитанным активам; incomplete — хотя бы у
+    // одного актива нет курса к eq_currency на конец периода.
+    std::string invested_eq = "0";
+    std::string revaluation_total_eq = "0";
+    std::string revaluation_period_eq = "0";
+    std::string value_eq = "0";
+    bool incomplete = false;
+};
+
+AssetsResult assets_for_period(db::Database& db, const std::string& ledger_id, const std::string& from,
+                               const std::string& to, const std::string& eq_currency_uuid);
 
 // Админ-таблица (POST /api/reports/admin/users/stats, только Role::Admin, см.
 // reports.cpp) — по одной строке на каждого ИЗ ПЕРЕДАННЫХ владельцев леджера (роль

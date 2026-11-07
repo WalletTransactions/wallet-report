@@ -457,7 +457,11 @@ paths:
         через системную категорию Transfer и попадает сюда как обычные
         `expense`+`income` по этой категории (см. память проекта: переводы
         считаются расходом в отчётах) — `kind: "transfer"` только у прямой
-        проводки кошелёк → кошелёк.
+        проводки кошелёк → кошелёк. `kind: "revaluation"` (capital-assets) —
+        проводка между активом и категорией «Переоценка» (`system_kind = 3`):
+        категория — «Переоценка», кошелёк — актив, `to_uuid` = актив —
+        переоценка вверх, `from_uuid` = актив — вниз. В сальдо `total_eq` без
+        `kind` она не входит.
       tags: [reports]
       security: [{bearerAuth: [], sessionCookie: []}]
       parameters:
@@ -500,7 +504,7 @@ paths:
         - name: kind
           in: query
           required: false
-          schema: {type: string, enum: [expense, income, transfer]}
+          schema: {type: string, enum: [expense, income, transfer, revaluation]}
           description: "Только операции этого типа (тот же kind, что у строк ответа). Меняет и правило знака total_eq."
         - name: q
           in: query
@@ -529,7 +533,7 @@ paths:
             `exclude_category_uuid: не больше 50 значений`,
             `category_uuid и exclude_category_uuid нельзя задавать вместе`,
             `wallet_uuid: некорректный uuid`, `wallet_uuid: не больше 50 значений`,
-            `kind должен быть expense, income или transfer`,
+            `kind должен быть expense, income, transfer или revaluation`,
             `q: не длиннее 100 символов` (в том числе битый UTF-8; у любого из вариантов),
             `q: не больше 10 значений`.
           content:
@@ -581,6 +585,47 @@ paths:
           description: Оборот каждого кошелька леджера, ORDER BY account_name
           content:
             application/json: {schema: {$ref: "#/components/schemas/WalletTurnoverReport"}}
+
+  /api/reports/assets:
+    get:
+      operationId: reportAssets
+      summary: Отчёт «Капитал» — вложено, переоценка, оценка и доходность по каждому активу
+      description: |
+        Обёртка над `f_assets_for_period` (wallet-api, change capital-assets).
+        Строка на каждый живой актив леджера — кошелёк с живой строкой
+        `account_asset`, включая архивные (`is_archived`) и проданные, по
+        убыванию `value_eq` (без курса — в конце). `from`/`to` включительно.
+
+        - `value` — оценка: остаток актива по всем проводкам с датой не позже `to`;
+        - `revaluation_total` — сумма проводок с категорией «Переоценка»
+          (`system_kind = 3`) не позже `to`: «Переоценка → актив» +, «актив →
+          Переоценка» −; `revaluation_period` — то же за `from`..`to`;
+        - `invested = value − revaluation_total` — покупка, ремонт, продажа;
+        - `return_pct` — `(value / invested − 1) × 100`, один знак, `null` при
+          `invested <= 0`.
+
+        `*_eq` — по одному курсу на конец периода; без курса — `null`, а у
+        ответа `incomplete: true`. Итоги — только по пересчитанным активам.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Активы леджера и итоги; без леджера — пустой список
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/AssetsReport"}}
 
   /api/reports/balance-at-dates:
     get:
@@ -906,7 +951,9 @@ components:
         precision: {type: integer}
         balance: {type: string, description: "В своей валюте счёта"}
         balance_eq: {type: string, description: "В валюте eq_currency; может быть JSON null, если курса не нашлось"}
-      required: [account_uuid, account_name, currency_uuid, symbol, precision, balance, balance_eq]
+        asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "Признак капитального актива (capital-assets): 1 — недвижимость, 2 — авто, 3 — прочее; null — ликвидный кошелёк."}
+        include_in_net_worth: {type: boolean, description: "Входит ли кошелёк в net_worth_eq; у ликвидного всегда true."}
+      required: [account_uuid, account_name, currency_uuid, symbol, precision, balance, balance_eq, asset_type, include_in_net_worth]
 
     BalanceReport:
       type: object
@@ -914,10 +961,13 @@ components:
         accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}}
         total_eq:
           type: string
-          description: "sum(balance_eq) по всем строкам (NULL пропускаются — см. incomplete)"
+          description: "sum(balance_eq) по ЛИКВИДНЫМ кошелькам (asset_type null; с capital-assets активы сюда не входят), NULL пропускаются — см. incomplete"
         incomplete:
           type: boolean
-          description: "true — хотя бы для одного счёта не нашлось курса в eq_currency, total_eq занижен"
+          description: "true — хотя бы для одного ликвидного кошелька не нашлось курса в eq_currency, total_eq занижен"
+        capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
+        capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
+        net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
         eq_currency_uuid:
           type: string
           format: uuid
@@ -1113,7 +1163,7 @@ components:
       properties:
         operation_uuid: {type: string, format: uuid}
         date: {type: string, description: "Timestamp операции, как хранится (локальное время устройства, без пояса)."}
-        kind: {type: string, enum: [expense, income, transfer]}
+        kind: {type: string, enum: [expense, income, transfer, revaluation]}
         amount: {type: string, description: "Сумма проводки в СВОЕЙ валюте (currency_uuid), не в эквиваленте."}
         currency_uuid: {type: string, format: uuid}
         symbol: {type: string, description: "Символ своей валюты проводки, для вывода amount без похода за currency отдельно."}
@@ -1195,7 +1245,8 @@ components:
         turnover_out: {type: string, description: "Сколько ушло с кошелька за период, в его СВОЕЙ валюте."}
         turnover_in_eq: {type: string, description: "То же самое движение, но в валюте eq_currency — для сортировки: суммы разных валют кошельков не сравнить напрямую. Может быть занижена без явного признака на строке, если курса не нашлось хотя бы для одной операции — см. incomplete у WalletTurnoverReport."}
         turnover_out_eq: {type: string, description: "Аналогично turnover_in_eq, для расхода с кошелька."}
-      required: [account_uuid, account_name, comment, is_archived, currency_uuid, symbol, precision, icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq]
+        asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "Признак капитального актива; null — ликвидный кошелёк. Переоценка (категория system_kind = 3) в обороты не входит."}
+      required: [account_uuid, account_name, comment, is_archived, currency_uuid, symbol, precision, icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq, asset_type]
 
     WalletTurnoverReport:
       type: object
@@ -1210,6 +1261,41 @@ components:
         eq_currency_uuid: {type: string, format: uuid, description: "См. BalanceReport.eq_currency_uuid — тот же смысл."}
       required: [wallets, incomplete, eq_currency_uuid]
 
+    AssetRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        is_archived: {type: boolean}
+        icon_sha256: {type: string}
+        asset_type: {type: integer, enum: [1, 2, 3], description: "1 — недвижимость, 2 — авто, 3 — прочее"}
+        include_in_net_worth: {type: boolean}
+        currency_uuid: {type: string, format: uuid}
+        symbol: {type: string}
+        precision: {type: string, description: "smallint текстом, как в остальных отчётах"}
+        invested: {type: string, description: "Вложено = value − revaluation_total, в валюте актива"}
+        revaluation_total: {type: string, description: "Переоценка накопленная по to включительно"}
+        revaluation_period: {type: string, description: "Переоценка за from..to"}
+        value: {type: string, description: "Оценка на конец периода — остаток актива"}
+        invested_eq: {type: [string, "null"]}
+        revaluation_total_eq: {type: [string, "null"]}
+        revaluation_period_eq: {type: [string, "null"]}
+        value_eq: {type: [string, "null"], description: "По курсу на конец периода; null — курса нет"}
+        return_pct: {type: [string, "null"], description: "Доходность в процентах, один знак; null при invested <= 0"}
+      required: [account_uuid, account_name, is_archived, icon_sha256, asset_type, include_in_net_worth, currency_uuid, symbol, precision, invested, revaluation_total, revaluation_period, value, invested_eq, revaluation_total_eq, revaluation_period_eq, value_eq, return_pct]
+
+    AssetsReport:
+      type: object
+      properties:
+        assets: {type: array, items: {$ref: "#/components/schemas/AssetRow"}}
+        invested_eq: {type: string}
+        revaluation_total_eq: {type: string}
+        revaluation_period_eq: {type: string}
+        value_eq: {type: string}
+        incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса к eq_currency на конец периода; итоги без него"}
+        eq_currency_uuid: {type: string, format: uuid}
+      required: [assets, invested_eq, revaluation_total_eq, revaluation_period_eq, value_eq, incomplete, eq_currency_uuid]
+
     BalanceAtDatesBlock:
       type: object
       properties:
@@ -1217,7 +1303,10 @@ components:
         accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}}
         total_eq: {type: string, description: "См. BalanceReport.total_eq — тот же смысл, но для ЭТОЙ даты."}
         incomplete: {type: boolean, description: "См. BalanceReport.incomplete — тот же смысл, но для ЭТОЙ даты."}
-      required: [date, accounts, total_eq, incomplete]
+        capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
+        capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
+        net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
+      required: [date, accounts, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq]
 
     BalanceAtDatesReport:
       type: object
@@ -1237,7 +1326,10 @@ components:
         accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}, description: "Только при accounts=true."}
         total_eq: {type: string, description: "См. BalanceReport.total_eq — тот же смысл, но для ЭТОГО бакета."}
         incomplete: {type: boolean, description: "См. BalanceReport.incomplete — тот же смысл, но для ЭТОГО бакета; пустой бакет (accounts: []) сюда не попадает как incomplete."}
-      required: [bucket_start, bucket_end, total_eq, incomplete]
+        capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
+        capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
+        net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
+      required: [bucket_start, bucket_end, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq]
 
     BalanceSeriesReport:
       type: object
@@ -1298,14 +1390,16 @@ components:
         uuid: {type: string, format: uuid}
         name: {type: string}
         kind: {type: string, enum: [wallet, category]}
-        system_kind: {type: integer, enum: [0, 1, 2], description: "0 — обычный счёт, 1 — Transfer, 2 — Transfer commission."}
+        system_kind: {type: integer, enum: [0, 1, 2, 3], description: "0 — обычный счёт, 1 — Transfer, 2 — Transfer commission, 3 — «Переоценка» (капитальных активов)."}
         is_archived: {type: boolean}
         icon_sha256: {type: string, description: "hex content_sha256 иконки — ключ для GET /sync/blobs/:sha256."}
         currency_uuid: {type: string, description: "Валюта кошелька; пустая строка у категории."}
         iso_code: {type: string, description: "ISO-код валюты кошелька; пустая строка у категории."}
         symbol: {type: string, description: "Символ валюты кошелька; пустая строка у категории."}
         precision: {type: string, description: "Число знаков в суммах валюты кошелька (smallint текстом, как остальные числа отчётов); пустая строка у категории."}
-      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision]
+        asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "У кошелька — признак актива (null — ликвидный); у категории всегда null."}
+        include_in_net_worth: {type: [boolean, "null"], description: "У кошелька — входит ли в «всего с капиталом» (у ликвидного true); у категории null."}
+      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision, asset_type, include_in_net_worth]
 
     UserStatsRow:
       type: object
