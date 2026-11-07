@@ -71,7 +71,8 @@ Postgres отклонит любую попытку `INSERT`/`UPDATE`/`DELETE` �
 
 | Путь | Что отдаёт |
 | --- | --- |
-| `GET /api/reports/balance` | Баланс каждого кошелька леджера на дату |
+| `GET /api/reports/balance` | Баланс каждого кошелька леджера на дату; у строки `asset_type`/`include_in_net_worth`, итоги `total_eq` (ликвидные), `capital_eq` (активы), `net_worth_eq` (всего с капиталом) |
+| `GET /api/reports/assets` | Отчёт «Капитал»: по каждому активу — вложено, переоценка накопленная и за период, оценка на конец периода, доходность; итоги в эквиваленте |
 | `GET /api/reports/income` / `/expense` | Доход/расход за период с разбивкой по счёту |
 | `GET /api/reports/expense-structure` | Доля каждой категории в расходе за период, с необязательным сравнением периодов; у строки `op_count` — число операций |
 | `GET /api/reports/expense-by-category-by-month` | Расход по категориям в разрезе календарных месяцев: все месяцы периода, у категории — итог, `op_count` и непустые месяцы. Итоги совпадают с `/expense-structure` (ноги перевода погашены в Transfer), а не с `/income-expense-by-month` |

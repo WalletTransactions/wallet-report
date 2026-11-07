@@ -147,12 +147,18 @@ void handle_balance(AppState& state, const httplib::Request& req, httplib::Respo
         return;
     }
 
-    reports_repo::ReportResult result;
+    reports_repo::BalanceResult result;
     if (!ctx->ledger_id.empty()) {
         result = reports_repo::balance_to_date(*state.reports_pool->acquire(), ctx->ledger_id,
                                                 req.get_param_value("date"), ctx->eq_currency_uuid);
     }
-    res.set_content(result_to_json(result, ctx->eq_currency_uuid).dump(), kJsonContentType);
+    // capital-assets: total_eq/incomplete — ликвидные кошельки, плюс итоги
+    // по активам и «всего с капиталом» (reports_repo::BalanceResult).
+    json body = result_to_json(result, ctx->eq_currency_uuid);
+    body["capital_eq"] = result.capital_eq;
+    body["capital_incomplete"] = result.capital_incomplete;
+    body["net_worth_eq"] = result.net_worth_eq;
+    res.set_content(body.dump(), kJsonContentType);
 }
 
 void handle_income(AppState& state, const httplib::Request& req, httplib::Response& res) {
@@ -512,6 +518,39 @@ void handle_wallet_turnover(AppState& state, const httplib::Request& req, httpli
     res.set_content(body.dump(), kJsonContentType);
 }
 
+// Отчёт «Капитал» (change capital-assets, design D4): по каждому активу —
+// вложено, переоценка накопленная и за период, оценка на конец периода и
+// доходность; итоги в эквиваленте. Параметры и ошибки — как у
+// /wallet-turnover. Без леджера — 200 и пустой список.
+void handle_assets(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/reports/assets"); // литерал из register_routes ниже
+    auto ctx = common_prolog(state, req, res);
+    if (!ctx) return;
+
+    if (!req.has_param("from") || req.get_param_value("from").empty() ||
+        !req.has_param("to") || req.get_param_value("to").empty()) {
+        json_error(res, 400, "from и to обязательны");
+        return;
+    }
+
+    reports_repo::AssetsResult result;
+    if (!ctx->ledger_id.empty()) {
+        result = reports_repo::assets_for_period(*state.reports_pool->acquire(), ctx->ledger_id,
+                                                 req.get_param_value("from"), req.get_param_value("to"),
+                                                 ctx->eq_currency_uuid);
+    }
+    json body = {
+        {"assets", result.rows},
+        {"invested_eq", result.invested_eq},
+        {"revaluation_total_eq", result.revaluation_total_eq},
+        {"revaluation_period_eq", result.revaluation_period_eq},
+        {"value_eq", result.value_eq},
+        {"incomplete", result.incomplete},
+        {"eq_currency_uuid", ctx->eq_currency_uuid},
+    };
+    res.set_content(body.dump(), kJsonContentType);
+}
+
 // Батч-баланс на несколько дат (по прямому запросу — "сервер научится
 // отдавать балком за период для нескольких кошельков"): "Кошельки и
 // остатки" делали до 14 отдельных GET /api/reports/balance на один показ
@@ -567,8 +606,13 @@ void handle_balance_at_dates(AppState& state, const httplib::Request& req, httpl
         // а не пустой список вовсе, чтобы вызывающий код видел ту же форму
         // ответа независимо от того, есть ли у пользователя леджер.
         for (const auto& d : dates) {
-            result.dates.push_back(
-                {{"date", d}, {"accounts", json::array()}, {"total_eq", "0"}, {"incomplete", false}});
+            result.dates.push_back({{"date", d},
+                                    {"accounts", json::array()},
+                                    {"total_eq", "0"},
+                                    {"incomplete", false},
+                                    {"capital_eq", "0"},
+                                    {"capital_incomplete", false},
+                                    {"net_worth_eq", "0"}});
         }
     }
     json body = {
@@ -848,6 +892,9 @@ void register_routes(httplib::Server& svr, AppState& state) {
     });
     svr.Get("/api/reports/accounts", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_accounts(state, req, res);
+    });
+    svr.Get("/api/reports/assets", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_assets(state, req, res);
     });
     svr.Get("/api/reports/wallet-turnover",
             [&state](const httplib::Request& req, httplib::Response& res) {
