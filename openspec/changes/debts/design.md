@@ -68,9 +68,13 @@ Open Questions): меняло бы смысл существующего пол�
 ### D4. `kind = "debt"`
 
 Проходит из `f_operations_for_period` без вычислений на стороне
-wallet-report; в строку добавляется `counterparty_uuid`. Параметр фильтра
-`kind` не расширяется: `revaluation` в нём тоже нет, `debt` ведёт себя так
-же — клиент отбирает сам.
+wallet-report; в строку добавляется `counterparty_uuid` — контрагент
+долговой стороны (`LEFT JOIN account_debt` по `from_uuid`/`to_uuid`), у
+остальных видов `null`. Параметр фильтра `kind` принимает `debt` — так же,
+как уже принимает `revaluation` (исходная посылка «`revaluation` в фильтре
+нет» не совпала с кодом; решение владельца 2026-11-12). Без этого долговые
+переводы нельзя отобрать на сервере: `kind=transfer` их больше не находит
+(wallet-api `000036`).
 
 ### D5. `/counterparties`
 

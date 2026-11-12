@@ -71,17 +71,19 @@ Postgres отклонит любую попытку `INSERT`/`UPDATE`/`DELETE` �
 
 | Путь | Что отдаёт |
 | --- | --- |
-| `GET /api/reports/balance` | Баланс каждого кошелька леджера на дату; у строки `asset_type`/`include_in_net_worth`, итоги `total_eq` (ликвидные), `capital_eq` (активы), `net_worth_eq` (всего с капиталом) |
+| `GET /api/reports/balance` | Баланс каждого кошелька леджера на дату; у строки `asset_type`/`include_in_net_worth`/`counterparty_uuid`, итоги `total_eq` (ликвидные — не активы и не долги), `capital_eq` (активы), `net_worth_eq` (всего с капиталом, без долгов), `receivable_eq` («мне должны» — сумма положительных остатков долговых кошельков), `payable_eq` («я должен» — модуль суммы отрицательных), `debts_incomplete`, `with_debts_eq` (= `total_eq + receivable_eq − payable_eq`). Те же итоги — в блоках `/balance-at-dates` и бакетах `/balance-series` |
 | `GET /api/reports/assets` | Отчёт «Капитал»: по каждому активу — вложено, переоценка накопленная и за период, оценка на конец периода, доходность; итоги в эквиваленте |
+| `GET /api/reports/debts` | Отчёт «Долги»: долговые кошельки по контрагентам — остаток на начало, поступления, выбытия, остаток на конец (знак — направление), срок; нетто по контрагенту и итоги `receivable_eq`/`payable_eq`/`balance_eq` в эквиваленте |
+| `GET /api/reports/counterparties` | Живые контрагенты леджера (`include_archived`) — для бота и веба |
 | `GET /api/reports/income` / `/expense` | Доход/расход за период с разбивкой по счёту |
 | `GET /api/reports/expense-structure` | Доля каждой категории в расходе за период, с необязательным сравнением периодов; у строки `op_count` — число операций |
 | `GET /api/reports/expense-by-category-by-month` | Расход по категориям в разрезе календарных месяцев: все месяцы периода, у категории — итог, `op_count` и непустые месяцы. Итоги совпадают с `/expense-structure` (ноги перевода погашены в Transfer), а не с `/income-expense-by-month` |
 | `GET /api/reports/income-expense-by-month` | Доход/расход по месяцам — экран "Обзор" |
 | `GET /api/reports/expense-by-weekday` | Расход по дню недели — экран "Обзор" |
 | `GET /api/reports/expense-biggest-moves` | Категории с наибольшим изменением расхода между двумя периодами — экран "Обзор" |
-| `GET /api/reports/operations` | Операции периода страницами по курсору — экран "Список операций"; необязательные фильтры `category_uuid`, `exclude_category_uuid` (всё, кроме этих категорий; вместе с `category_uuid` — 400), `wallet_uuid` (списки через запятую), `kind`, `q` до пагинации, при фильтрах — итог `total_eq`/`total_incomplete`/`total_count` по всему периоду |
+| `GET /api/reports/operations` | Операции периода страницами по курсору — экран "Список операций"; необязательные фильтры `category_uuid`, `exclude_category_uuid` (всё, кроме этих категорий; вместе с `category_uuid` — 400), `wallet_uuid` (списки через запятую), `kind`, `q` до пагинации, при фильтрах — итог `total_eq`/`total_incomplete`/`total_count` по всему периоду. `kind = "debt"` — перевод между долговым и обычным кошельком, у строки `counterparty_uuid` |
 | `GET /api/reports/currencies` | Справочник валют — для выпадающего списка "Валюта эквивалента" и списка валют; у элемента `show_in_equivalent`, `is_own` (boolean), `icon_uuid`, `precision` (число) |
-| `GET /api/reports/accounts` | Все живые кошельки и категории леджера (`kind`, `include_archived`) — для Telegram-бота |
+| `GET /api/reports/accounts` | Все живые кошельки и категории леджера (`kind`, `include_archived`) — для Telegram-бота; у долгового кошелька `counterparty_uuid` |
 | `GET /api/reports/icons` | Иконки, доступные леджеру: общий набор (`common`) и свои (`user`) — вкладка "Иконки" |
 
 Общие query-параметры бо́льшей части ручек: `eq_currency` (ISO-код валюты

@@ -42,3 +42,28 @@
 #### Scenario: Прощение
 - **WHEN** есть проводка «Вася · USD → категория Списание долгов»
 - **THEN** строка получает `kind: "expense"`
+
+### Requirement: Проверка параметров фильтра
+Сервис SHALL отвечать 400 до обращения к базе, если в `category_uuid` или
+`wallet_uuid` есть не-uuid или пустой элемент либо больше 50 значений, `kind` не
+из `expense`/`income`/`transfer`/`revaluation`/`debt` или `q` длиннее 100
+символов (символы, а не байты). Тексты ошибок: `category_uuid: некорректный uuid`,
+`category_uuid: не больше 50 значений` (так же для `wallet_uuid`),
+`kind должен быть expense, income, transfer, revaluation или debt`,
+`q: не длиннее 100 символов`.
+
+#### Scenario: Битый uuid
+- **WHEN** `wallet_uuid=abc`
+- **THEN** 400 `wallet_uuid: некорректный uuid`
+
+#### Scenario: Пустой элемент списка
+- **WHEN** `category_uuid=<uuid>,`
+- **THEN** 400 `category_uuid: некорректный uuid`
+
+#### Scenario: Длинный q кириллицей
+- **WHEN** `q` — 100 кириллических букв (200 байт UTF-8)
+- **THEN** запрос принят; при 101 букве — 400 `q: не длиннее 100 символов`
+
+#### Scenario: Фильтр по долгам
+- **WHEN** `kind=debt`
+- **THEN** в ответе только операции `kind: "debt"`, а при `kind=transfer` их нет
