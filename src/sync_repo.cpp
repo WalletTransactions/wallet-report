@@ -13,6 +13,12 @@ const std::vector<TableSpec>& push_tables() {
         {"account_operating", Scope::LedgerOnly, {"currency_uuid"}},
         // capital-assets — ровно как в wallet-api/src/sync_repo.cpp.
         {"account_asset", Scope::LedgerOnly, {"asset_type", "include_in_net_worth", "comment"}},
+        // debts — как в wallet-api/src/sync_repo.cpp: icon_uuid и due_date
+        // необязательны и допускают null.
+        {"counterparty", Scope::LedgerOnly, {"name", "comment", "icon_uuid", "is_archived"},
+         {}, {}, {}, {}, "", {"icon_uuid"}, {{"icon_uuid", "uuid"}}},
+        {"account_debt", Scope::LedgerOnly, {"counterparty_uuid", "comment", "due_date"},
+         {}, {}, {}, {}, "", {"due_date"}, {{"due_date", "date"}}},
         {"operation", Scope::LedgerOnly,
          {"date", "acc_fr_uuid", "acc_to_uuid", "amount", "comment"}, {"amount"}},
         {"operation_link", Scope::LedgerOnly, {"main_uuid", "link_uuid", "type"}},
@@ -66,10 +72,12 @@ const TableSpec* find_spec(const std::vector<TableSpec>& tables, const std::stri
 // "currency" алфавитно — без этого списка INSERT в account_operating ушёл
 // бы ДО currency и упал на 23503. Тот же порядок, что TABLE_ORDER на
 // Android-клиенте (SyncEngine, применяет pull симметрично) — не совпадение,
-// зависимости одни и те же в обе стороны.
+// зависимости одни и те же в обе стороны. Обязан совпадать с kApplyOrder
+// wallet-api (change debts: counterparty, account_debt — после account_asset).
 constexpr const char* kApplyOrder[] = {
     "icon", "currency", "currency_pair", "currency_pair_rate", "currency_conversion",
-    "account", "account_operating", "account_asset", "operation", "operation_link",
+    "account", "account_operating", "account_asset", "counterparty", "account_debt",
+    "operation", "operation_link",
 };
 
 // JSON -> текстовый параметр SQL. Суммы/курсы приходят СТРОКАМИ уже на
@@ -121,11 +129,23 @@ void upsert_row(db::Database::Transaction& tx, const TableSpec& spec, const std:
     for (const auto& col : spec.columns) {
         // Необязательная колонка без ключа — вне INSERT и вне SET, см.
         // TableSpec::optional_columns.
+        // Колонка с NULL (nullable_types): JSON null едет пустой строкой, а
+        // NULLIF(...)::тип делает из неё NULL — db.hpp не передаёт NULL параметром.
+        std::string nullable_type;
+        bool is_null = false;
         if (std::find(spec.optional_columns.begin(), spec.optional_columns.end(), col) !=
             spec.optional_columns.end()) {
             auto it = row.find(col);
             if (it == row.end()) continue;
-            if (!it->is_boolean()) throw std::runtime_error(col + ": ожидается boolean");
+            for (const auto& [name, type] : spec.nullable_types) {
+                if (name == col) nullable_type = type;
+            }
+            if (nullable_type.empty()) {
+                if (!it->is_boolean()) throw std::runtime_error(col + ": ожидается boolean");
+            } else {
+                is_null = it->is_null();
+                if (!is_null && !it->is_string()) throw std::runtime_error(col + ": ожидается строка или null");
+            }
         }
         bool is_hex = std::find(spec.hex_columns.begin(), spec.hex_columns.end(), col) !=
                       spec.hex_columns.end();
@@ -137,7 +157,11 @@ void upsert_row(db::Database::Transaction& tx, const TableSpec& spec, const std:
         // hex_columns) — decode(...,'hex') превращает её обратно в байты на
         // границе SQL; params всё равно остаётся текстовым (см. db.hpp,
         // почему сырые байты параметром передавать нельзя).
-        values_sql += ", " + (is_hex ? "decode(" + placeholder + ",'hex')" : placeholder);
+        if (!nullable_type.empty()) {
+            values_sql += ", NULLIF(" + placeholder + ", '')::" + nullable_type;
+        } else {
+            values_sql += ", " + (is_hex ? "decode(" + placeholder + ",'hex')" : placeholder);
+        }
         // Колонка естественного ключа (conflict_columns) — она же арбитр
         // ON CONFLICT, ей и так гарантированно равны NEW/EXCLUDED в момент
         // конфликта; включать её в SET было бы самоприсвоением того же
@@ -145,7 +169,7 @@ void upsert_row(db::Database::Transaction& tx, const TableSpec& spec, const std:
         bool is_conflict_key = std::find(spec.conflict_columns.begin(), spec.conflict_columns.end(),
                                           col) != spec.conflict_columns.end();
         if (!is_conflict_key) update_sql += ", " + col + " = EXCLUDED." + col;
-        std::string param = scalar_to_param(row.at(col));
+        std::string param = is_null ? std::string{} : scalar_to_param(row.at(col));
         // date_only_columns — обрезаем ЯВНО до "yyyy-MM-dd" (10 символов),
         // не полагаясь на неявный CAST text->date (см. TableSpec::
         // date_only_columns, почему): клиент прислал что-то с временем — тот
@@ -202,6 +226,11 @@ std::vector<Conflict> diagnose_account_conflicts(db::Database& db, const std::st
 }
 
 } // namespace
+
+const std::vector<std::string>& apply_order() {
+    static const std::vector<std::string> order(std::begin(kApplyOrder), std::end(kApplyOrder));
+    return order;
+}
 
 PushOutcome push_batch(db::Database& db, const std::string& ledger_id, const std::string& device_id,
                         const std::string& batch_id, const json& changes) {
