@@ -92,23 +92,40 @@ struct ReportResult {
     bool incomplete = false;
 };
 
-// Итоги остатков (change capital-assets, design D2): total_eq/incomplete
-// (в ReportResult и блоках) — только ЛИКВИДНЫЕ кошельки (asset_type IS
+// Итоги остатков (change capital-assets, design D2; change debts, design
+// D1/D2): total_eq/incomplete (в ReportResult и блоках) — только ЛИКВИДНЫЕ
+// кошельки (не актив и не долг: asset_type IS NULL AND counterparty_uuid IS
 // NULL); capital_eq/capital_incomplete — активы; net_worth_eq — ликвидные
-// плюс активы с include_in_net_worth. Как и total_eq, в суммы входят только
-// пересчитанные в эквивалент кошельки.
+// плюс активы с include_in_net_worth (долги не входят); receivable_eq —
+// сумма положительных остатков долговых кошельков («мне должны»),
+// payable_eq — модуль суммы отрицательных («я должен»), debts_incomplete — у
+// части долговых нет курса, with_debts_eq = total_eq + receivable_eq −
+// payable_eq. Положительные и отрицательные — по кошелькам, не по
+// контрагенту. Как и total_eq, в суммы входят только пересчитанные в
+// эквивалент кошельки.
 struct BalanceResult : ReportResult {
     std::string capital_eq = "0";
     bool capital_incomplete = false;
     std::string net_worth_eq = "0";
+    std::string receivable_eq = "0";
+    std::string payable_eq = "0";
+    bool debts_incomplete = false;
+    std::string with_debts_eq = "0";
 };
+
+// Девять итогов BalanceResult одним JSON-объектом (ключи — имена полей); у
+// блока /balance-at-dates и бакета /balance-series — те же ключи.
+nlohmann::json balance_totals_json(const BalanceResult& r);
+// Итоги без кошельков (нет леджера, пустая дата) — все суммы "0", признаки false.
+nlohmann::json empty_balance_totals();
 
 // Баланс каждого кошелька леджера на дату — обёртка над f_balance_to_date
 // (wallet-api/schema/function/f_balance_to_date.sql) с агрегатами (итоги
 // BalanceResult по всему результату через `OVER ()`, без второго похода в
 // базу). Строка: {account_uuid, account_name, currency_uuid, symbol,
 // precision, balance, balance_eq, asset_type (число 1/2/3 или null),
-// include_in_net_worth (bool, у ликвидного true)}.
+// include_in_net_worth (bool, у ликвидного true), counterparty_uuid
+// (контрагент долгового кошелька или null, change debts)}.
 BalanceResult balance_to_date(db::Database& db, const std::string& ledger_id,
                               const std::string& date, const std::string& eq_currency_uuid);
 
@@ -534,6 +551,49 @@ struct AssetsResult {
 
 AssetsResult assets_for_period(db::Database& db, const std::string& ledger_id, const std::string& from,
                                const std::string& to, const std::string& eq_currency_uuid);
+
+// Отчёт «Долги» (GET /api/reports/debts, change debts, design D2/D3) —
+// обёртка над f_debts_for_period (wallet-api): строка на каждый живой
+// долговой кошелёк (включая нулевые и архивные), сгруппированная здесь по
+// контрагенту. Все суммы и итоги — из SQL (оконные агрегаты), в C++ ничего не
+// складывается.
+//
+// counterparties[i]: {counterparty_uuid, name, is_archived (bool),
+// balance_eq (сумма balance_to_eq его пересчитанных кошельков; null — ни
+// один не пересчитан), incomplete (bool — у части его кошельков нет курса),
+// accounts: [...]}. Порядок — |balance_eq| убыв., без курса (null) в конце,
+// затем имя и uuid.
+//
+// accounts[j]: {account_uuid, account_name, is_archived (bool),
+// currency_uuid, symbol, precision, due_date ("yyyy-MM-dd" или null),
+// comment, balance_from, inflow, outflow, balance_to (строки в точности
+// валюты; balance_to = balance_from + inflow − outflow, знак — направление:
+// «+» — контрагент должен, «−» — леджер должен), balance_to_eq, inflow_eq,
+// outflow_eq (null без курса)}, порядок — имя кошелька, uuid.
+struct DebtsResult {
+    nlohmann::json counterparties = nlohmann::json::array();
+    // Итоги по всем пересчитанным кошелькам: receivable_eq — сумма
+    // положительных balance_to_eq, payable_eq — модуль суммы отрицательных,
+    // balance_eq = receivable_eq − payable_eq; incomplete — у части кошельков
+    // нет курса к эквиваленту на конец периода.
+    std::string receivable_eq = "0";
+    std::string payable_eq = "0";
+    std::string balance_eq = "0";
+    bool incomplete = false;
+};
+
+DebtsResult debts_for_period(db::Database& db, const std::string& ledger_id, const std::string& from,
+                             const std::string& to, const std::string& eq_currency_uuid);
+
+// Справочник контрагентов (GET /api/reports/counterparties, change debts,
+// design D5): живые контрагенты леджера, по умолчанию без архивных. Строка:
+// {uuid, name, comment, is_archived (bool), icon_uuid, icon_sha256 (оба null
+// у контрагента без иконки)}, ORDER BY name, uuid.
+struct CounterpartiesResult {
+    nlohmann::json counterparties = nlohmann::json::array();
+};
+
+CounterpartiesResult list_counterparties(db::Database& db, const std::string& ledger_id, bool include_archived);
 
 // Админ-таблица (POST /api/reports/admin/users/stats, только Role::Admin, см.
 // reports.cpp) — по одной строке на каждого ИЗ ПЕРЕДАННЫХ владельцев леджера (роль

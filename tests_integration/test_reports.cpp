@@ -1441,8 +1441,8 @@ TEST(operations_filter_parse_rejects_bad_input_with_exact_texts) {
              std::string("category_uuid: не больше 50 значений"));
 
     CHECK_EQ(reports_repo::parse_operations_filter("", "", "Expense", "", f).value_or(""),
-             std::string("kind должен быть expense, income, transfer или revaluation"));
-    for (const char* k : {"expense", "income", "transfer"}) {
+             std::string("kind должен быть expense, income, transfer, revaluation или debt"));
+    for (const char* k : {"expense", "income", "transfer", "revaluation", "debt"}) {
         CHECK(!reports_repo::parse_operations_filter("", "", k, "", f).has_value());
     }
 
@@ -3109,4 +3109,418 @@ TEST(assets_for_period_without_ledger_assets_is_empty) {
     CHECK(a.rows.empty());
     CHECK_EQ(a.value_eq, std::string("0"));
     CHECK(!a.incomplete);
+}
+
+// ---- debts: долговые кошельки, контрагенты, отчёт «Долги» -----------------
+// Сценарии specs/* change debts. Один леджер, эквивалент — валюта E (курс 1),
+// F → E по 2 с 2026-01-01, у N курса нет. Период отчётов — март 2026.
+//   2026-01-05 Зарплата → Карта (E)        5000
+//   2026-01-06 Зарплата → Наличные F       1000  (= 2000 E)
+//   2026-02-15 Зарплата → Коля · N           10  (долг без курса, архивный контрагент)
+//   2026-03-05 Карта → Вася 1 (E)          1000  (выдано в долг)
+//   2026-03-06 Карта → Вася 2 (E)           100  (второй заём, другой срок)
+//   2026-03-07 Наличные F → Вася F           50  (= 100 E)
+//   2026-03-08 Петя (E) → Карта              30  (взято в долг)
+//   2026-03-20 Вася 1 → Карта               400  (частичный возврат)
+//   2026-03-25 Вася 2 → Списание долгов      20  (прощение — расход)
+//   2026-03-26 Вася 2 → Петя                  5  (перевод между долгами)
+//   2026-04-05 Карта → Вася 1               999  (после периода)
+// На 2026-04-01: Карта 4330, Наличные F 950 (= 1900); Вася 1 600, Вася 2 75,
+// Вася F 50 (= 100), Петя −25, Коля 10 N (без курса).
+
+namespace {
+
+json counterparty_row(const std::string& uuid, const std::string& name, bool archived = false) {
+    return json{{"uuid", uuid}, {"name", name}, {"comment", ""}, {"is_archived", archived}};
+}
+
+json debt_row(const std::string& wallet_uuid, const std::string& counterparty_uuid, const std::string& due_date) {
+    json row = {{"uuid", wallet_uuid}, {"counterparty_uuid", counterparty_uuid}, {"comment", "заём"}};
+    row["due_date"] = due_date.empty() ? json(nullptr) : json(due_date);
+    return row;
+}
+
+struct DebtLedger {
+    fixture::TestIdentity identity;
+    std::string icon, e, f, n, iso_e, eq;
+    std::string card = uuidgen::v4(), cash_f = uuidgen::v4(), salary = uuidgen::v4(), write_off = uuidgen::v4();
+    std::string vasya = uuidgen::v4(), petya = uuidgen::v4(), kolya = uuidgen::v4();
+    std::string vasya1 = uuidgen::v4(), vasya2 = uuidgen::v4(), vasya_f = uuidgen::v4();
+    std::string petya_e = uuidgen::v4(), kolya_n = uuidgen::v4();
+    std::string op_give = uuidgen::v4(), op_back = uuidgen::v4(), op_borrow = uuidgen::v4();
+    std::string op_forgive = uuidgen::v4(), op_debt2debt = uuidgen::v4(), op_kolya = uuidgen::v4();
+};
+
+DebtLedger seed_debt_ledger(db::Database& db, db::Database& reports_db) {
+    DebtLedger l;
+    l.identity = fixture::make_identity(db);
+    l.icon = fixture::make_reference_icon(db);
+    l.e = uuidgen::v4();
+    l.f = uuidgen::v4();
+    l.n = uuidgen::v4();
+    l.iso_e = "DE" + uuidgen::v4().substr(0, 1);
+    std::string iso_f = "DF" + uuidgen::v4().substr(0, 1), iso_n = "DN" + uuidgen::v4().substr(0, 1);
+    std::string pair = uuidgen::v4();
+    json changes = {
+        {"currency", json::array({currency_row(l.e, l.icon, l.iso_e), currency_row(l.f, l.icon, iso_f),
+                                  currency_row(l.n, l.icon, iso_n)})},
+        {"currency_pair", json::array({currency_pair_row(pair, iso_f + l.iso_e + pair, l.f, l.e)})},
+        {"currency_pair_rate", json::array({currency_pair_rate_row(uuidgen::v4(), pair, "2026-01-01", "2")})},
+        {"account", json::array({account_row(l.card, l.icon, "Карта " + l.card),
+                                  account_row(l.cash_f, l.icon, "Наличные F " + l.cash_f),
+                                  account_row(l.salary, l.icon, "Зарплата " + l.salary),
+                                  account_row(l.write_off, l.icon, "Списание долгов " + l.write_off),
+                                  account_row(l.vasya1, l.icon, "Вася 1 " + l.vasya1),
+                                  account_row(l.vasya2, l.icon, "Вася 2 " + l.vasya2),
+                                  account_row(l.vasya_f, l.icon, "Вася F " + l.vasya_f),
+                                  account_row(l.petya_e, l.icon, "Петя " + l.petya_e),
+                                  account_row(l.kolya_n, l.icon, "Коля N " + l.kolya_n)})},
+        {"account_operating",
+         json::array({account_operating_row(l.card, l.e), account_operating_row(l.cash_f, l.f),
+                      account_operating_row(l.vasya1, l.e), account_operating_row(l.vasya2, l.e),
+                      account_operating_row(l.vasya_f, l.f), account_operating_row(l.petya_e, l.e),
+                      account_operating_row(l.kolya_n, l.n)})},
+        {"counterparty", json::array({counterparty_row(l.vasya, "Вася " + l.vasya),
+                                      counterparty_row(l.petya, "Петя " + l.petya),
+                                      counterparty_row(l.kolya, "Коля " + l.kolya, /*archived=*/true)})},
+        {"account_debt", json::array({debt_row(l.vasya1, l.vasya, "2026-12-31"), debt_row(l.vasya2, l.vasya, "2027-06-30"),
+                                      debt_row(l.vasya_f, l.vasya, ""), debt_row(l.petya_e, l.petya, ""),
+                                      debt_row(l.kolya_n, l.kolya, "")})},
+        {"operation", json::array({
+             operation_row(uuidgen::v4(), "2026-01-05T10:00:00", l.salary, l.card, "5000.00"),
+             operation_row(uuidgen::v4(), "2026-01-06T10:00:00", l.salary, l.cash_f, "1000.00"),
+             operation_row(l.op_kolya, "2026-02-15T10:00:00", l.salary, l.kolya_n, "10.00"),
+             operation_row(l.op_give, "2026-03-05T10:00:00", l.card, l.vasya1, "1000.00"),
+             operation_row(uuidgen::v4(), "2026-03-06T10:00:00", l.card, l.vasya2, "100.00"),
+             operation_row(uuidgen::v4(), "2026-03-07T10:00:00", l.cash_f, l.vasya_f, "50.00"),
+             operation_row(l.op_borrow, "2026-03-08T10:00:00", l.petya_e, l.card, "30.00"),
+             operation_row(l.op_back, "2026-03-20T10:00:00", l.vasya1, l.card, "400.00"),
+             operation_row(l.op_forgive, "2026-03-25T10:00:00", l.vasya2, l.write_off, "20.00"),
+             operation_row(l.op_debt2debt, "2026-03-26T10:00:00", l.vasya2, l.petya_e, "5.00"),
+             operation_row(uuidgen::v4(), "2026-04-05T10:00:00", l.card, l.vasya1, "999.00"),
+         })},
+    };
+    // Кошельки — kind = 1 (как их шлёт Android).
+    for (auto& a : changes["account"]) {
+        std::string u = a.at("uuid").get<std::string>();
+        if (u != l.salary && u != l.write_off) a["kind"] = 1;
+    }
+    auto push = sync_repo::push_batch(db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+    auto eq = reports_repo::resolve_eq_currency(reports_db, l.iso_e, l.identity.ledger_id);
+    REQUIRE(eq.has_value());
+    l.eq = *eq;
+    return l;
+}
+
+const char* kDebtFrom = "2026-03-01";
+const char* kDebtTo = "2026-03-31 23:59:59";
+
+std::string str(const json& v) { return v.is_null() ? std::string("null") : v.get<std::string>(); }
+
+} // namespace
+
+TEST(sync_apply_order_matches_wallet_api) {
+    // Копия kApplyOrder wallet-api (change debts): counterparty, account_debt
+    // — после account_asset, до operation.
+    const std::vector<std::string> expected = {
+        "icon", "currency", "currency_pair", "currency_pair_rate", "currency_conversion", "account",
+        "account_operating", "account_asset", "counterparty", "account_debt", "operation", "operation_link"};
+    CHECK(sync_repo::apply_order() == expected);
+    // Сид леджера с контрагентами и долгами одним батчем проходит.
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+    auto res = reports_db->exec(
+        "SELECT (SELECT count(*) FROM counterparty WHERE ledger_id = $1), "
+        "(SELECT count(*) FROM account_debt WHERE ledger_id = $1 AND deleted_at IS NULL), "
+        "(SELECT due_date::text FROM account_debt WHERE ledger_id = $1 AND uuid = $2), "
+        "(SELECT coalesce(due_date::text, 'NULL') FROM account_debt WHERE ledger_id = $1 AND uuid = $3)",
+        {l.identity.ledger_id, l.vasya1, l.petya_e});
+    CHECK_EQ(res.rows.at(0).fields.at(0), std::string("3"));
+    CHECK_EQ(res.rows.at(0).fields.at(1), std::string("5"));
+    CHECK_EQ(res.rows.at(0).fields.at(2), std::string("2026-12-31"));
+    CHECK_EQ(res.rows.at(0).fields.at(3), std::string("NULL"));
+}
+
+TEST(balance_separates_debts_from_liquid_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto r = reports_repo::balance_to_date(*reports_db, l.identity.ledger_id, "2026-04-01", l.eq);
+    CHECK_EQ(r.total_eq, std::string("6230.00"));     // Карта 4330 + Наличные F 1900
+    CHECK(!r.incomplete);                              // Коля без курса — не ликвидный
+    CHECK_EQ(r.receivable_eq, std::string("775.00"));  // 600 + 75 + 100
+    CHECK_EQ(r.payable_eq, std::string("25.00"));      // Петя −25
+    CHECK(r.debts_incomplete);                         // Коля · N без курса
+    CHECK_EQ(r.with_debts_eq, std::string("6980.00")); // 6230 + 775 − 25
+    CHECK_EQ(r.net_worth_eq, std::string("6230.00"));  // долги в чистый капитал не входят
+    CHECK_EQ(r.capital_eq, std::string("0"));
+
+    const json* v1 = find_by(r.rows, "account_uuid", l.vasya1);
+    const json* card = find_by(r.rows, "account_uuid", l.card);
+    const json* petya = find_by(r.rows, "account_uuid", l.petya_e);
+    REQUIRE(v1 && card && petya);
+    CHECK(v1->at("counterparty_uuid") == json(l.vasya));
+    CHECK(card->at("counterparty_uuid").is_null());
+    CHECK_EQ(petya->at("balance").get<std::string>(), std::string("-25.00"));
+
+    // Те же итоги в блоке /balance-at-dates и бакете /balance-series (обе ветки).
+    auto at = reports_repo::balances_at_dates(*reports_db, l.identity.ledger_id, {"2026-04-01"}, l.eq);
+    REQUIRE(at.dates.size() == static_cast<size_t>(1));
+    CHECK_EQ(str(at.dates[0].at("receivable_eq")), std::string("775.00"));
+    CHECK_EQ(str(at.dates[0].at("payable_eq")), std::string("25.00"));
+    CHECK_EQ(str(at.dates[0].at("with_debts_eq")), std::string("6980.00"));
+    CHECK(at.dates[0].at("debts_incomplete").get<bool>());
+    const json* at_v1 = find_by(at.dates[0].at("accounts"), "account_uuid", l.vasya1);
+    REQUIRE(at_v1 != nullptr);
+    CHECK(at_v1->at("counterparty_uuid") == json(l.vasya));
+}
+
+TEST(balance_series_debt_totals_match_accounts_breakdown) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto with = reports_repo::balance_series(*reports_db, l.identity.ledger_id, "2026-01-01", "2026-03-31", "month",
+                                             l.eq, true);
+    auto without = reports_repo::balance_series(*reports_db, l.identity.ledger_id, "2026-01-01", "2026-03-31", "month",
+                                                l.eq, false);
+    REQUIRE(with.buckets.size() == static_cast<size_t>(3));
+    REQUIRE(without.buckets.size() == with.buckets.size());
+    for (std::size_t i = 0; i < with.buckets.size(); ++i) {
+        for (const char* k : {"total_eq", "receivable_eq", "payable_eq", "with_debts_eq", "net_worth_eq"}) {
+            CHECK_EQ(str(with.buckets[i].at(k)), str(without.buckets[i].at(k)));
+        }
+        for (const char* k : {"incomplete", "debts_incomplete"}) {
+            CHECK(with.buckets[i].at(k) == without.buckets[i].at(k));
+        }
+        // Итоги долгов = суммы по счетам с контрагентом (курс у всех кроме N).
+        double pos = 0, neg = 0;
+        for (const auto& a : with.buckets[i].at("accounts")) {
+            if (a.at("counterparty_uuid").is_null()) continue;
+            std::string eq = a.at("balance_eq").get<std::string>();
+            if (eq.empty()) continue;
+            double v = std::stod(eq);
+            (v > 0 ? pos : neg) += v;
+        }
+        CHECK(std::fabs(std::stod(str(with.buckets[i].at("receivable_eq"))) - pos) < 0.005);
+        CHECK(std::fabs(std::stod(str(with.buckets[i].at("payable_eq"))) + neg) < 0.005);
+    }
+    // Март: те же числа, что у balance_to_date на 2026-04-01.
+    CHECK_EQ(str(without.buckets[2].at("receivable_eq")), std::string("775.00"));
+    CHECK_EQ(str(without.buckets[2].at("payable_eq")), std::string("25.00"));
+    CHECK(without.buckets[2].at("debts_incomplete").get<bool>());
+    CHECK(!without.buckets[2].at("incomplete").get<bool>());
+}
+
+TEST(balance_giving_and_taking_loan_keeps_with_debts_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+    // Выдача займа 1000 (2026-03-05) и получение займа 30 (2026-03-08): даты
+    // «до» и «после» каждой — без других проводок между ними.
+    auto at = reports_repo::balances_at_dates(*reports_db, l.identity.ledger_id,
+                                              {"2026-03-05", "2026-03-06", "2026-03-08", "2026-03-09"}, l.eq);
+    REQUIRE(at.dates.size() == static_cast<size_t>(4));
+    const auto& before_give = at.dates[0];
+    const auto& after_give = at.dates[1];
+    CHECK_EQ(str(before_give.at("total_eq")), std::string("7000.00"));
+    CHECK_EQ(str(after_give.at("total_eq")), std::string("6000.00"));
+    CHECK_EQ(str(before_give.at("receivable_eq")), std::string("0"));
+    CHECK_EQ(str(after_give.at("receivable_eq")), std::string("1000.00"));
+    CHECK_EQ(str(before_give.at("with_debts_eq")), str(after_give.at("with_debts_eq")));
+
+    const auto& before_take = at.dates[2];
+    const auto& after_take = at.dates[3];
+    CHECK_EQ(str(before_take.at("payable_eq")), std::string("0"));
+    CHECK_EQ(str(after_take.at("payable_eq")), std::string("30.00"));
+    CHECK_EQ(std::stod(str(after_take.at("total_eq"))) - std::stod(str(before_take.at("total_eq"))), 30.0);
+    CHECK_EQ(str(before_take.at("with_debts_eq")), str(after_take.at("with_debts_eq")));
+}
+
+TEST(balance_unmarked_debt_returns_to_liquid_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+    json tombstone = debt_row(l.vasya_f, l.vasya, "");
+    tombstone["deleted"] = true;
+    REQUIRE(sync_repo::push_batch(*db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(),
+                                  {{"account_debt", json::array({tombstone})}})
+                .http_status == 200);
+
+    auto r = reports_repo::balance_to_date(*reports_db, l.identity.ledger_id, "2026-04-01", l.eq);
+    CHECK_EQ(r.total_eq, std::string("6330.00"));    // + Вася F 100
+    CHECK_EQ(r.receivable_eq, std::string("675.00"));
+    const json* vf = find_by(r.rows, "account_uuid", l.vasya_f);
+    REQUIRE(vf != nullptr);
+    CHECK(vf->at("counterparty_uuid").is_null());
+    CHECK_EQ(vf->at("balance").get<std::string>(), std::string("50.00")); // баланс не тронут
+}
+
+TEST(operations_mark_debt_with_counterparty) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto ops = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq, 100,
+                                                   "", "");
+    const json* give = find_by(ops.rows, "operation_uuid", l.op_give);
+    const json* borrow = find_by(ops.rows, "operation_uuid", l.op_borrow);
+    const json* forgive = find_by(ops.rows, "operation_uuid", l.op_forgive);
+    const json* d2d = find_by(ops.rows, "operation_uuid", l.op_debt2debt);
+    REQUIRE(give && borrow && forgive && d2d);
+    CHECK_EQ(give->at("kind").get<std::string>(), std::string("debt"));
+    CHECK_EQ(give->at("to_uuid").get<std::string>(), l.vasya1);
+    CHECK(give->at("counterparty_uuid") == json(l.vasya));
+    CHECK_EQ(borrow->at("kind").get<std::string>(), std::string("debt"));
+    CHECK(borrow->at("counterparty_uuid") == json(l.petya));
+    CHECK_EQ(forgive->at("kind").get<std::string>(), std::string("expense"));
+    CHECK(forgive->at("counterparty_uuid").is_null());
+    CHECK_EQ(d2d->at("kind").get<std::string>(), std::string("transfer"));
+    CHECK(d2d->at("counterparty_uuid").is_null());
+    // Порядок страницы прежний — date DESC.
+    for (std::size_t i = 1; i < ops.rows.size(); ++i) {
+        CHECK(ops.rows[i - 1].at("date").get<std::string>() >= ops.rows[i].at("date").get<std::string>());
+    }
+
+    reports_repo::OperationsFilter f;
+    REQUIRE(!reports_repo::parse_operations_filter("", "", "debt", "", f).has_value());
+    auto only = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq, 100,
+                                                    "", "", f);
+    CHECK_EQ(only.rows.size(), static_cast<size_t>(5)); // выдачи Васе ×3, заём у Пети, возврат Васи
+    CHECK_EQ(only.total_count, 5LL);
+}
+
+TEST(accounts_turnover_mark_debt_and_flows_exclude_loans) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto a = reports_repo::list_accounts(*reports_db, l.identity.ledger_id, reports_repo::AccountKindFilter::Any, false);
+    const json* v1 = find_by(a.accounts, "uuid", l.vasya1);
+    const json* card = find_by(a.accounts, "uuid", l.card);
+    const json* wo = find_by(a.accounts, "uuid", l.write_off);
+    REQUIRE(v1 && card && wo);
+    CHECK(v1->at("counterparty_uuid") == json(l.vasya));
+    CHECK(card->at("counterparty_uuid").is_null());
+    CHECK(wo->at("counterparty_uuid").is_null());
+
+    auto t = reports_repo::wallet_turnover_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    const json* tv1 = find_by(t.rows, "account_uuid", l.vasya1);
+    REQUIRE(tv1 != nullptr);
+    CHECK(tv1->at("counterparty_uuid") == json(l.vasya));
+    CHECK_EQ(tv1->at("turnover_in").get<std::string>(), std::string("1000.00"));
+    CHECK_EQ(tv1->at("turnover_out").get<std::string>(), std::string("400.00"));
+
+    // За март доходов нет, расход — только прощение 20.
+    auto inc = reports_repo::income_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    CHECK(inc.rows.empty());
+    auto exp = reports_repo::expense_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    REQUIRE(exp.rows.size() == static_cast<size_t>(1));
+    CHECK_EQ(exp.rows[0].at("account_uuid").get<std::string>(), l.write_off);
+    CHECK_EQ(exp.total_eq, std::string("20.00"));
+}
+
+TEST(debts_report_groups_by_counterparty_with_totals) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto d = reports_repo::debts_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    REQUIRE(d.counterparties.size() == static_cast<size_t>(3));
+    // Порядок — |итог| убыв., без курса в конце.
+    const json& vasya = d.counterparties[0];
+    const json& petya = d.counterparties[1];
+    const json& kolya = d.counterparties[2];
+    CHECK_EQ(vasya.at("counterparty_uuid").get<std::string>(), l.vasya);
+    CHECK_EQ(petya.at("counterparty_uuid").get<std::string>(), l.petya);
+    CHECK_EQ(kolya.at("counterparty_uuid").get<std::string>(), l.kolya);
+
+    // Вася: три кошелька — два займа в E с разными сроками и один в F.
+    CHECK_EQ(str(vasya.at("balance_eq")), std::string("775.00"));
+    CHECK(!vasya.at("incomplete").get<bool>());
+    REQUIRE(vasya.at("accounts").size() == static_cast<size_t>(3));
+    const json* v1 = find_by(vasya.at("accounts"), "account_uuid", l.vasya1);
+    const json* v2 = find_by(vasya.at("accounts"), "account_uuid", l.vasya2);
+    const json* vf = find_by(vasya.at("accounts"), "account_uuid", l.vasya_f);
+    REQUIRE(v1 && v2 && vf);
+    // Частичный возврат: 0 / 1000 / 400 / 600; 999 после периода не входит.
+    CHECK_EQ(str(v1->at("balance_from")), std::string("0.00"));
+    CHECK_EQ(str(v1->at("inflow")), std::string("1000.00"));
+    CHECK_EQ(str(v1->at("outflow")), std::string("400.00"));
+    CHECK_EQ(str(v1->at("balance_to")), std::string("600.00"));
+    CHECK_EQ(str(v1->at("due_date")), std::string("2026-12-31"));
+    CHECK_EQ(str(v2->at("due_date")), std::string("2027-06-30"));
+    CHECK_EQ(str(v2->at("balance_to")), std::string("75.00"));
+    CHECK(vf->at("due_date").is_null());
+    CHECK_EQ(str(vf->at("balance_to")), std::string("50.00"));
+    CHECK_EQ(str(vf->at("balance_to_eq")), std::string("100.00"));
+
+    // Петя: остаток со знаком «я должен».
+    CHECK_EQ(str(petya.at("balance_eq")), std::string("-25.00"));
+    REQUIRE(petya.at("accounts").size() == static_cast<size_t>(1));
+    CHECK_EQ(str(petya.at("accounts")[0].at("balance_to")), std::string("-25.00"));
+
+    // Коля: архивный контрагент, валюта без курса — суммы есть, в итоги не входит.
+    CHECK(kolya.at("is_archived").get<bool>());
+    CHECK(kolya.at("balance_eq").is_null());
+    CHECK(kolya.at("incomplete").get<bool>());
+    const json& kn = kolya.at("accounts")[0];
+    CHECK_EQ(str(kn.at("balance_from")), std::string("10.00"));
+    CHECK_EQ(str(kn.at("balance_to")), std::string("10.00"));
+    CHECK(kn.at("balance_to_eq").is_null());
+
+    CHECK_EQ(d.receivable_eq, std::string("775.00"));
+    CHECK_EQ(d.payable_eq, std::string("25.00"));
+    CHECK_EQ(d.balance_eq, std::string("750.00"));
+    CHECK(d.incomplete);
+}
+
+TEST(debts_report_overpayment_and_empty_ledger) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+    // Переплата: Вася 1 вернул ещё 700 — остаток −100, уходит в «я должен».
+    REQUIRE(sync_repo::push_batch(*db, l.identity.ledger_id, l.identity.device_id, uuidgen::v4(),
+                                  {{"operation", json::array({operation_row(uuidgen::v4(), "2026-03-28T10:00:00",
+                                                                            l.vasya1, l.card, "700.00")})}})
+                .http_status == 200);
+    auto d = reports_repo::debts_for_period(*reports_db, l.identity.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    const json* vasya = find_by(d.counterparties, "counterparty_uuid", l.vasya);
+    REQUIRE(vasya != nullptr);
+    const json* v1 = find_by(vasya->at("accounts"), "account_uuid", l.vasya1);
+    REQUIRE(v1 != nullptr);
+    CHECK_EQ(str(v1->at("balance_to")), std::string("-100.00"));
+    CHECK_EQ(d.receivable_eq, std::string("175.00")); // Вася 2 75 + Вася F 100
+    CHECK_EQ(d.payable_eq, std::string("125.00"));    // Вася 1 −100, Петя −25
+
+    // Леджер без долгов — пусто, итоги "0".
+    auto other = fixture::make_identity(*db);
+    auto e = reports_repo::debts_for_period(*reports_db, other.ledger_id, kDebtFrom, kDebtTo, l.eq);
+    CHECK(e.counterparties.empty());
+    CHECK_EQ(e.balance_eq, std::string("0"));
+    CHECK(!e.incomplete);
+}
+
+TEST(counterparties_hide_archived_by_default_and_are_read_only) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_debt_ledger(*db, *reports_db);
+
+    auto live = reports_repo::list_counterparties(*reports_db, l.identity.ledger_id, false);
+    CHECK_EQ(live.counterparties.size(), static_cast<size_t>(2));
+    CHECK(find_by(live.counterparties, "uuid", l.kolya) == nullptr);
+    const json* vasya = find_by(live.counterparties, "uuid", l.vasya);
+    REQUIRE(vasya != nullptr);
+    CHECK(vasya->at("icon_uuid").is_null());
+    CHECK(vasya->at("is_archived") == json(false));
+
+    auto all = reports_repo::list_counterparties(*reports_db, l.identity.ledger_id, true);
+    CHECK_EQ(all.counterparties.size(), static_cast<size_t>(3));
+
+    // Роль отчётов (wallet_reader) писать в таблицу не может.
+    CHECK_THROWS(reports_db->exec("INSERT INTO counterparty (uuid, ledger_id, seq, name) VALUES ($1, $2, 1, 'x')",
+                                  {uuidgen::v4(), l.identity.ledger_id}));
 }

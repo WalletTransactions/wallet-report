@@ -152,12 +152,11 @@ void handle_balance(AppState& state, const httplib::Request& req, httplib::Respo
         result = reports_repo::balance_to_date(*state.reports_pool->acquire(), ctx->ledger_id,
                                                 req.get_param_value("date"), ctx->eq_currency_uuid);
     }
-    // capital-assets: total_eq/incomplete — ликвидные кошельки, плюс итоги
-    // по активам и «всего с капиталом» (reports_repo::BalanceResult).
+    // capital-assets, debts: total_eq/incomplete — ликвидные кошельки (не
+    // актив и не долг), плюс итоги по активам, «всего с капиталом» и долгам
+    // (reports_repo::BalanceResult).
     json body = result_to_json(result, ctx->eq_currency_uuid);
-    body["capital_eq"] = result.capital_eq;
-    body["capital_incomplete"] = result.capital_incomplete;
-    body["net_worth_eq"] = result.net_worth_eq;
+    body.update(reports_repo::balance_totals_json(result));
     res.set_content(body.dump(), kJsonContentType);
 }
 
@@ -551,6 +550,60 @@ void handle_assets(AppState& state, const httplib::Request& req, httplib::Respon
     res.set_content(body.dump(), kJsonContentType);
 }
 
+// Отчёт «Долги» (change debts, design D2/D3): долговые кошельки,
+// сгруппированные по контрагенту, движение за период и итоги «мне должны / я
+// должен» в эквиваленте. Параметры и ошибки — как у /assets. Без леджера —
+// 200 и пустой список.
+void handle_debts(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/reports/debts"); // литерал из register_routes ниже
+    auto ctx = common_prolog(state, req, res);
+    if (!ctx) return;
+
+    if (!req.has_param("from") || req.get_param_value("from").empty() ||
+        !req.has_param("to") || req.get_param_value("to").empty()) {
+        json_error(res, 400, "from и to обязательны");
+        return;
+    }
+
+    reports_repo::DebtsResult result;
+    if (!ctx->ledger_id.empty()) {
+        result = reports_repo::debts_for_period(*state.reports_pool->acquire(), ctx->ledger_id,
+                                                req.get_param_value("from"), req.get_param_value("to"),
+                                                ctx->eq_currency_uuid);
+    }
+    json body = {
+        {"counterparties", result.counterparties},
+        {"receivable_eq", result.receivable_eq},
+        {"payable_eq", result.payable_eq},
+        {"balance_eq", result.balance_eq},
+        {"incomplete", result.incomplete},
+        {"eq_currency_uuid", ctx->eq_currency_uuid},
+    };
+    res.set_content(body.dump(), kJsonContentType);
+}
+
+// Справочник контрагентов (change debts, design D5) — для бота и веба. Как
+// /accounts: без периода и eq_currency, include_archived=true|false, без
+// леджера — 200 и пустой список.
+void handle_counterparties(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/reports/counterparties"); // литерал из register_routes ниже
+    auto ledger_id = auth_and_ledger(state, req, res);
+    if (!ledger_id) return;
+
+    std::string archived_param = req.get_param_value("include_archived");
+    if (!archived_param.empty() && archived_param != "true" && archived_param != "false") {
+        json_error(res, 400, "include_archived должен быть true или false");
+        return;
+    }
+
+    reports_repo::CounterpartiesResult result;
+    if (!ledger_id->empty()) {
+        result = reports_repo::list_counterparties(*state.reports_pool->acquire(), *ledger_id,
+                                                   archived_param == "true");
+    }
+    res.set_content(json{{"counterparties", result.counterparties}}.dump(), kJsonContentType);
+}
+
 // Батч-баланс на несколько дат (по прямому запросу — "сервер научится
 // отдавать балком за период для нескольких кошельков"): "Кошельки и
 // остатки" делали до 14 отдельных GET /api/reports/balance на один показ
@@ -606,13 +659,10 @@ void handle_balance_at_dates(AppState& state, const httplib::Request& req, httpl
         // а не пустой список вовсе, чтобы вызывающий код видел ту же форму
         // ответа независимо от того, есть ли у пользователя леджер.
         for (const auto& d : dates) {
-            result.dates.push_back({{"date", d},
-                                    {"accounts", json::array()},
-                                    {"total_eq", "0"},
-                                    {"incomplete", false},
-                                    {"capital_eq", "0"},
-                                    {"capital_incomplete", false},
-                                    {"net_worth_eq", "0"}});
+            json block = reports_repo::empty_balance_totals();
+            block["date"] = d;
+            block["accounts"] = json::array();
+            result.dates.push_back(block);
         }
     }
     json body = {
@@ -895,6 +945,12 @@ void register_routes(httplib::Server& svr, AppState& state) {
     });
     svr.Get("/api/reports/assets", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_assets(state, req, res);
+    });
+    svr.Get("/api/reports/debts", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_debts(state, req, res);
+    });
+    svr.Get("/api/reports/counterparties", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_counterparties(state, req, res);
     });
     svr.Get("/api/reports/wallet-turnover",
             [&state](const httplib::Request& req, httplib::Response& res) {
