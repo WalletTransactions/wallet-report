@@ -2,7 +2,7 @@
 
 ## 1. Зависимости и тестовые данные
 
-- [ ] 1.1 Дождаться миграции wallet-api `debts` на test (таблицы, `v_account_operating.counterparty_uuid`, `f_debts_for_period`, `GRANT SELECT` для `wallet_reader`). Проверка: `SELECT * FROM f_debts_for_period(...)` ролью `wallet_reader` на test.
+- [x] 1.1 Дождаться миграции wallet-api `debts` на test (таблицы, `v_account_operating.counterparty_uuid`, `f_debts_for_period`, `GRANT SELECT` для `wallet_reader`). Проверка: `SELECT * FROM f_debts_for_period(...)` ролью `wallet_reader` на test.
 - [x] 1.2 Тестовая копия `src/sync_repo.cpp`: `counterparty` и `account_debt` в `TableSpec` и в порядок применения (после `account_asset`), совпадающий с `kApplyOrder` wallet-api. Проверка: юнит-тест порядка и сид леджера с контрагентами и долговыми кошельками проходит в `tests_integration/`.
 
 ## 2. Балансовые отчёты
@@ -23,7 +23,7 @@
 ## 5. Контракт и документация
 
 - [x] 5.1 `openapi.yaml`: `reportDebts`, `reportCounterparties`, новые поля в ответах balance/operations/accounts/turnover, значение `debt` у `kind`; таблица эндпоинтов и описание итогов в `README.md`. Проверка: `openapi.yaml` проходит линтер, `GET /docs` отдаёт новые схемы.
-- [ ] 5.2 Проверка выката на test: wallet-report поверх мигрированной базы. Проверка: `env-deploy`, интеграционные тесты wallet-report на test зелёные.
+- [x] 5.2 Проверка выката на test: wallet-report поверх мигрированной базы. Проверка: `env-deploy`, интеграционные тесты wallet-report на test зелёные.
 
 ## Примечания к выполнению
 
