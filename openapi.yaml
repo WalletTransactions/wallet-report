@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: wallet-report
-  version: "0.2.0"
+  version: "0.3.0"
   description: |
     Сервис отчётов (CQRS-lite query-сторона, выделена из `wallet-api`
     2026-09-08 — см. `wallet-report/README.md`, "История"). Читает
