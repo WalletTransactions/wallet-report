@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: wallet-report
-  version: "0.2.0"
+  version: "0.3.0"
   description: |
     Сервис отчётов (CQRS-lite query-сторона, выделена из `wallet-api`
     2026-09-08 — см. `wallet-report/README.md`, "История"). Читает
@@ -461,7 +461,13 @@ paths:
         проводка между активом и категорией «Переоценка» (`system_kind = 3`):
         категория — «Переоценка», кошелёк — актив, `to_uuid` = актив —
         переоценка вверх, `from_uuid` = актив — вниз. В сальдо `total_eq` без
-        `kind` она не входит.
+        `kind` она не входит. `kind: "debt"` (debts) — прямая проводка
+        кошелёк → кошелёк, у которой ровно одна сторона — долговой кошелёк:
+        заполнены `from_uuid`/`to_uuid` и `counterparty_uuid` контрагента
+        долговой стороны; перевод между двумя долговыми — `transfer`,
+        «долговой кошелёк ↔ категория» (прощение, проценты) — `expense`/
+        `income`. Подпись «Дал / Взял / Вернул» считает клиент по балансу. В
+        сальдо без `kind` долги не входят, а `kind=transfer` их не находит.
       tags: [reports]
       security: [{bearerAuth: [], sessionCookie: []}]
       parameters:
@@ -504,7 +510,7 @@ paths:
         - name: kind
           in: query
           required: false
-          schema: {type: string, enum: [expense, income, transfer, revaluation]}
+          schema: {type: string, enum: [expense, income, transfer, revaluation, debt]}
           description: "Только операции этого типа (тот же kind, что у строк ответа). Меняет и правило знака total_eq."
         - name: q
           in: query
@@ -533,7 +539,7 @@ paths:
             `exclude_category_uuid: не больше 50 значений`,
             `category_uuid и exclude_category_uuid нельзя задавать вместе`,
             `wallet_uuid: некорректный uuid`, `wallet_uuid: не больше 50 значений`,
-            `kind должен быть expense, income, transfer или revaluation`,
+            `kind должен быть expense, income, transfer, revaluation или debt`,
             `q: не длиннее 100 символов` (в том числе битый UTF-8; у любого из вариантов),
             `q: не больше 10 значений`.
           content:
@@ -626,6 +632,79 @@ paths:
           description: Активы леджера и итоги; без леджера — пустой список
           content:
             application/json: {schema: {$ref: "#/components/schemas/AssetsReport"}}
+
+  /api/reports/debts:
+    get:
+      operationId: reportDebts
+      summary: Отчёт «Долги» — остатки и движение по долговым кошелькам, по контрагентам
+      description: |
+        Обёртка над `f_debts_for_period` (wallet-api, change debts). Долг —
+        кошелёк с живой строкой `account_debt`; знак остатка — направление:
+        «+» — контрагент должен леджеру, «−» — леджер должен контрагенту.
+        Кошельки сгруппированы по контрагенту (у одного контрагента их может
+        быть несколько: разные валюты, разные займы), включая нулевые и
+        архивные — фильтрует клиент. `from`/`to` включительно.
+
+        - `balance_from` — остаток строго до `from`; `inflow`/`outflow` —
+          проводки на кошелёк и с него за период; `balance_to` = `balance_from
+          + inflow − outflow`. Прощение и проценты — проводки с категорией,
+          входят в движение как любые другие;
+        - `*_eq` — по одному курсу на конец периода; без курса — `null`,
+          кошелёк в итоги не входит, у ответа `incomplete: true`;
+        - итоги: `receivable_eq` — сумма положительных остатков, `payable_eq` —
+          модулей отрицательных, `balance_eq` — их разность; у контрагента —
+          `balance_eq` (нетто по его кошелькам).
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/periodFrom"
+        - $ref: "#/components/parameters/periodTo"
+        - $ref: "#/components/parameters/eqCurrency"
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: from/to отсутствуют, либо eq_currency отсутствует/неизвестный ISO-код
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Долги леджера по контрагентам и итоги; без леджера — пустой список
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/DebtsReport"}}
+
+  /api/reports/counterparties:
+    get:
+      operationId: reportCounterparties
+      summary: Справочник контрагентов леджера (для бота и веба)
+      description: |
+        Живые (не удалённые) контрагенты леджера (change debts) — без
+        привязки к периоду; по умолчанию без архивных. Нет леджера — 200 и
+        `counterparties: []`. Только чтение.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - name: include_archived
+          in: query
+          required: false
+          schema: {type: string, enum: ["true", "false"], default: "false"}
+          description: "Показывать архивных контрагентов (по умолчанию нет)."
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "400":
+          description: "include_archived не true/false"
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Контрагенты по имени
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/CounterpartiesReport"}}
 
   /api/reports/balance-at-dates:
     get:
@@ -953,7 +1032,8 @@ components:
         balance_eq: {type: string, description: "В валюте eq_currency; может быть JSON null, если курса не нашлось"}
         asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "Признак капитального актива (capital-assets): 1 — недвижимость, 2 — авто, 3 — прочее; null — ликвидный кошелёк."}
         include_in_net_worth: {type: boolean, description: "Входит ли кошелёк в net_worth_eq; у ликвидного всегда true."}
-      required: [account_uuid, account_name, currency_uuid, symbol, precision, balance, balance_eq, asset_type, include_in_net_worth]
+        counterparty_uuid: {type: [string, "null"], format: uuid, description: "Контрагент долгового кошелька (живая строка account_debt, change debts); null — не долговой."}
+      required: [account_uuid, account_name, currency_uuid, symbol, precision, balance, balance_eq, asset_type, include_in_net_worth, counterparty_uuid]
 
     BalanceReport:
       type: object
@@ -961,13 +1041,17 @@ components:
         accounts: {type: array, items: {$ref: "#/components/schemas/BalanceReportRow"}}
         total_eq:
           type: string
-          description: "sum(balance_eq) по ЛИКВИДНЫМ кошелькам (asset_type null; с capital-assets активы сюда не входят), NULL пропускаются — см. incomplete"
+          description: "sum(balance_eq) по ЛИКВИДНЫМ кошелькам — не активам и не долгам (asset_type и counterparty_uuid null; capital-assets, debts), NULL пропускаются — см. incomplete"
         incomplete:
           type: boolean
           description: "true — хотя бы для одного ликвидного кошелька не нашлось курса в eq_currency, total_eq занижен"
         capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
         capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
-        net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
+        net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth. Долги не входят — см. with_debts_eq."}
+        receivable_eq: {type: string, description: "«Мне должны» (debts): сумма положительных остатков долговых кошельков, только пересчитанные. По кошелькам, не нетто по контрагенту."}
+        payable_eq: {type: string, description: "«Я должен» (debts): сумма модулей отрицательных остатков долговых кошельков (неотрицательное число), только пересчитанные."}
+        debts_incomplete: {type: boolean, description: "true — хотя бы у одного долгового кошелька нет курса в eq_currency, receivable_eq/payable_eq занижены."}
+        with_debts_eq: {type: string, description: "Итог с долгами: total_eq + receivable_eq − payable_eq."}
         eq_currency_uuid:
           type: string
           format: uuid
@@ -1163,7 +1247,7 @@ components:
       properties:
         operation_uuid: {type: string, format: uuid}
         date: {type: string, description: "Timestamp операции, как хранится (локальное время устройства, без пояса)."}
-        kind: {type: string, enum: [expense, income, transfer, revaluation]}
+        kind: {type: string, enum: [expense, income, transfer, revaluation, debt]}
         amount: {type: string, description: "Сумма проводки в СВОЕЙ валюте (currency_uuid), не в эквиваленте."}
         currency_uuid: {type: string, format: uuid}
         symbol: {type: string, description: "Символ своей валюты проводки, для вывода amount без похода за currency отдельно."}
@@ -1185,10 +1269,11 @@ components:
         from_name: {type: string}
         to_uuid: {type: string, format: uuid, description: "Счёт зачисления — как в operation.acc_to_uuid, для ЛЮБОГО kind."}
         to_name: {type: string}
+        counterparty_uuid: {type: [string, "null"], format: uuid, description: "У kind=debt — контрагент долговой стороны проводки; у остальных null."}
       required:
         [operation_uuid, date, kind, amount, currency_uuid, symbol, precision, amount_eq, comment,
          category_uuid, category_name, icon_sha256, wallet_uuid, wallet_name,
-         from_uuid, from_name, to_uuid, to_name]
+         from_uuid, from_name, to_uuid, to_name, counterparty_uuid]
 
     OperationsReport:
       type: object
@@ -1246,7 +1331,8 @@ components:
         turnover_in_eq: {type: string, description: "То же самое движение, но в валюте eq_currency — для сортировки: суммы разных валют кошельков не сравнить напрямую. Может быть занижена без явного признака на строке, если курса не нашлось хотя бы для одной операции — см. incomplete у WalletTurnoverReport."}
         turnover_out_eq: {type: string, description: "Аналогично turnover_in_eq, для расхода с кошелька."}
         asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "Признак капитального актива; null — ликвидный кошелёк. Переоценка (категория system_kind = 3) в обороты не входит."}
-      required: [account_uuid, account_name, comment, is_archived, currency_uuid, symbol, precision, icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq, asset_type]
+        counterparty_uuid: {type: [string, "null"], format: uuid, description: "Контрагент долгового кошелька (debts); null — не долговой. Выдача и возврат долга — обычное движение по кошельку, не доход и не расход."}
+      required: [account_uuid, account_name, comment, is_archived, currency_uuid, symbol, precision, icon_sha256, turnover_in, turnover_out, turnover_in_eq, turnover_out_eq, asset_type, counterparty_uuid]
 
     WalletTurnoverReport:
       type: object
@@ -1306,7 +1392,11 @@ components:
         capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
         capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
         net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
-      required: [date, accounts, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq]
+        receivable_eq: {type: string, description: "См. BalanceReport.receivable_eq — для ЭТОЙ даты."}
+        payable_eq: {type: string, description: "См. BalanceReport.payable_eq — для ЭТОЙ даты."}
+        debts_incomplete: {type: boolean, description: "См. BalanceReport.debts_incomplete — для ЭТОЙ даты."}
+        with_debts_eq: {type: string, description: "См. BalanceReport.with_debts_eq — для ЭТОЙ даты."}
+      required: [date, accounts, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq, receivable_eq, payable_eq, debts_incomplete, with_debts_eq]
 
     BalanceAtDatesReport:
       type: object
@@ -1329,7 +1419,11 @@ components:
         capital_eq: {type: string, description: "sum(balance_eq) по активам (asset_type не null), только пересчитанные."}
         capital_incomplete: {type: boolean, description: "true — хотя бы у одного актива нет курса в eq_currency, capital_eq занижен."}
         net_worth_eq: {type: string, description: "Всего с капиталом: ликвидные кошельки плюс активы с include_in_net_worth."}
-      required: [bucket_start, bucket_end, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq]
+        receivable_eq: {type: string, description: "См. BalanceReport.receivable_eq — для ЭТОГО бакета; совпадает с суммой по счетам при accounts=true."}
+        payable_eq: {type: string, description: "См. BalanceReport.payable_eq — для ЭТОГО бакета."}
+        debts_incomplete: {type: boolean, description: "См. BalanceReport.debts_incomplete — для ЭТОГО бакета."}
+        with_debts_eq: {type: string, description: "См. BalanceReport.with_debts_eq — для ЭТОГО бакета."}
+      required: [bucket_start, bucket_end, total_eq, incomplete, capital_eq, capital_incomplete, net_worth_eq, receivable_eq, payable_eq, debts_incomplete, with_debts_eq]
 
     BalanceSeriesReport:
       type: object
@@ -1399,7 +1493,73 @@ components:
         precision: {type: string, description: "Число знаков в суммах валюты кошелька (smallint текстом, как остальные числа отчётов); пустая строка у категории."}
         asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "У кошелька — признак актива (null — ликвидный); у категории всегда null."}
         include_in_net_worth: {type: [boolean, "null"], description: "У кошелька — входит ли в «всего с капиталом» (у ликвидного true); у категории null."}
-      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision, asset_type, include_in_net_worth]
+        counterparty_uuid: {type: [string, "null"], format: uuid, description: "У долгового кошелька — контрагент (живая строка account_debt, debts); у остальных кошельков и категорий null. По нему бот исключает долговые кошельки из выбора трат."}
+      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision, asset_type, include_in_net_worth, counterparty_uuid]
+
+    DebtsReport:
+      type: object
+      properties:
+        counterparties:
+          type: array
+          items: {$ref: "#/components/schemas/DebtCounterparty"}
+          description: "Контрагенты с живыми долговыми кошельками, по |balance_eq| убыв.; без курса (balance_eq null) — в конце."
+        receivable_eq: {type: string, description: "«Мне должны»: сумма положительных balance_to_eq кошельков, только пересчитанные."}
+        payable_eq: {type: string, description: "«Я должен»: сумма модулей отрицательных balance_to_eq (неотрицательное число)."}
+        balance_eq: {type: string, description: "receivable_eq − payable_eq."}
+        incomplete: {type: boolean, description: "true — у части кошельков нет курса к eq_currency на конец периода; в итоги они не вошли."}
+        eq_currency_uuid: {type: string, format: uuid}
+      required: [counterparties, receivable_eq, payable_eq, balance_eq, incomplete, eq_currency_uuid]
+
+    DebtCounterparty:
+      type: object
+      properties:
+        counterparty_uuid: {type: string, format: uuid}
+        name: {type: string}
+        is_archived: {type: boolean, description: "Признак интерфейса — долги архивного контрагента в отчёте остаются."}
+        balance_eq: {type: [string, "null"], description: "Нетто по контрагенту: сумма balance_to_eq его пересчитанных кошельков; null — ни один не пересчитан."}
+        incomplete: {type: boolean, description: "true — у части его кошельков нет курса."}
+        accounts: {type: array, items: {$ref: "#/components/schemas/DebtAccountRow"}, description: "Долговые кошельки контрагента (включая нулевые и архивные), по имени."}
+      required: [counterparty_uuid, name, is_archived, balance_eq, incomplete, accounts]
+
+    DebtAccountRow:
+      type: object
+      properties:
+        account_uuid: {type: string, format: uuid}
+        account_name: {type: string}
+        is_archived: {type: boolean}
+        currency_uuid: {type: string, format: uuid}
+        symbol: {type: string}
+        precision: {type: string, description: "smallint текстом, как в остальных отчётах"}
+        due_date: {type: [string, "null"], format: date, description: "Срок возврата; null — не задан."}
+        comment: {type: string}
+        balance_from: {type: string, description: "Остаток строго до from, в валюте кошелька."}
+        inflow: {type: string, description: "Сумма проводок на кошелёк за from..to включительно."}
+        outflow: {type: string, description: "Сумма проводок с кошелька за from..to включительно."}
+        balance_to: {type: string, description: "Остаток на to включительно = balance_from + inflow − outflow. «+» — контрагент должен, «−» — леджер должен."}
+        balance_to_eq: {type: [string, "null"], description: "По одному курсу на to; null — курса нет."}
+        inflow_eq: {type: [string, "null"]}
+        outflow_eq: {type: [string, "null"]}
+      required: [account_uuid, account_name, is_archived, currency_uuid, symbol, precision, due_date, comment, balance_from, inflow, outflow, balance_to, balance_to_eq, inflow_eq, outflow_eq]
+
+    CounterpartiesReport:
+      type: object
+      properties:
+        counterparties:
+          type: array
+          items: {$ref: "#/components/schemas/CounterpartyRow"}
+          description: "Живые контрагенты леджера, ORDER BY name."
+      required: [counterparties]
+
+    CounterpartyRow:
+      type: object
+      properties:
+        uuid: {type: string, format: uuid}
+        name: {type: string}
+        comment: {type: string}
+        is_archived: {type: boolean}
+        icon_uuid: {type: [string, "null"], format: uuid, description: "null — контрагент без иконки."}
+        icon_sha256: {type: [string, "null"], description: "hex content_sha256 иконки — ключ для GET /sync/blobs/:sha256; null без иконки."}
+      required: [uuid, name, comment, is_archived, icon_uuid, icon_sha256]
 
     UserStatsRow:
       type: object

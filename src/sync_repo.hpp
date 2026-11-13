@@ -105,7 +105,17 @@ struct TableSpec {
     // JSON-boolean. Здесь нужно тестам, которые засевают валюту со снятым
     // флагом (test_reports.cpp, list_currencies_*).
     std::vector<std::string> optional_columns;
+    // Колонки из optional_columns, допускающие NULL (change debts, копия
+    // wallet-api TableSpec::optional_kinds): account_debt.due_date,
+    // counterparty.icon_uuid. JSON null — SQL NULL (NULLIF($n, '')::<тип>),
+    // строка — как есть; пара — имя колонки и SQL-тип ("date"/"uuid").
+    // Колонка, которой здесь нет, — boolean.
+    std::vector<std::pair<std::string, std::string>> nullable_types;
 };
+
+// Порядок применения push-батча (kApplyOrder) — наружу ради теста сверки с
+// wallet-api (test_reports.cpp, sync_apply_order_matches_wallet_api).
+const std::vector<std::string>& apply_order();
 
 // Все таблицы, которые клиент может ОТПРАВИТЬ — включая icon (метаданные;
 // само содержимое — отдельные /sync/blobs, см. шапку файла).

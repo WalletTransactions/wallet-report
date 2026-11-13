@@ -30,39 +30,111 @@ void set_asset_fields(json& row, const std::string& asset_type, const std::strin
     row["include_in_net_worth"] = include_in_net_worth.empty() || include_in_net_worth == "t";
 }
 
-// Пять итогов остатков (design D2 capital-assets) оконными агрегатами с
-// FILTER поверх строки баланса: total_eq/incomplete — ликвидные,
-// capital_eq/capital_incomplete — активы, net_worth_eq — ликвидные плюс
-// активы с include_in_net_worth. `extra` — дополнительное условие строки
-// (в balance_series — «строка — реальный счёт, не пустой бакет»), over —
-// окно ("()" или "(PARTITION BY date_index)").
-std::string balance_totals_sql(const std::string& over, const std::string& extra = "") {
-    std::string row_ok = extra.empty() ? "" : extra + " AND ";
-    return "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NULL) OVER " + over + ", 0)::text AS total_eq, "
-           "COALESCE(bool_or(" + row_ok + "balance_eq IS NULL) FILTER (WHERE asset_type IS NULL) OVER " + over +
-           ", false) AS incomplete, "
-           "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NOT NULL) OVER " + over + ", 0)::text AS capital_eq, "
-           "COALESCE(bool_or(" + row_ok + "balance_eq IS NULL) FILTER (WHERE asset_type IS NOT NULL) OVER " + over +
-           ", false) AS capital_incomplete, "
-           "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NULL OR include_in_net_worth) OVER " + over +
-           ", 0)::text AS net_worth_eq";
+// Признак долга на строке кошелька (debts): counterparty_uuid — uuid
+// контрагента или null (не долговой; SQL NULL приходит пустой строкой).
+void set_debt_field(json& row, const std::string& counterparty_uuid) {
+    row["counterparty_uuid"] = counterparty_uuid.empty() ? json(nullptr) : json(counterparty_uuid);
 }
 
-// Пять итогов из полей строки, начиная с first (порядок balance_totals_sql).
+// Предикаты строки баланса — одним местом для трёх балансовых отчётов (debts,
+// design D1/D2): ликвидный кошелёк — не актив и не долг; долговой — с
+// контрагентом. Кошелёк и актив, и долг (схема не запрещает) — в капитале и в
+// долгах, но не в ликвидных.
+constexpr const char* kLiquid = "(asset_type IS NULL AND counterparty_uuid IS NULL)";
+constexpr const char* kDebt = "(counterparty_uuid IS NOT NULL)";
+
+// Список агрегатов итогов (без OVER) — общий для оконной (balance_totals_sql)
+// и сгруппированной (balance_series без accounts) форм. row_ok — условие
+// «строка — реальный счёт» для incomplete (в balance_series пустой бакет даёт
+// строку с balance_eq IS NULL, это не «нет курса»). Девять итогов по порядку:
+// total_eq, incomplete (ликвидные); capital_eq, capital_incomplete (активы);
+// net_worth_eq (ликвидные плюс активы с include_in_net_worth, без долгов —
+// design, Open Questions); receivable_eq (сумма положительных остатков
+// долговых кошельков), payable_eq (модуль суммы отрицательных),
+// debts_incomplete, with_debts_eq (= total + receivable − payable, то есть
+// ликвидные плюс все долговые остатки). Положительные и отрицательные
+// остатки — по кошелькам, не по контрагенту (design D2).
+std::vector<std::string> balance_total_aggregates(const std::string& row_ok) {
+    std::string liquid = kLiquid, debt = kDebt;
+    std::string ok = row_ok.empty() ? "" : row_ok + " AND ";
+    return {
+        "sum(balance_eq) FILTER (WHERE " + liquid + ")",
+        "bool_or(" + ok + "balance_eq IS NULL) FILTER (WHERE " + liquid + ")",
+        "sum(balance_eq) FILTER (WHERE asset_type IS NOT NULL)",
+        "bool_or(" + ok + "balance_eq IS NULL) FILTER (WHERE asset_type IS NOT NULL)",
+        "sum(balance_eq) FILTER (WHERE " + liquid + " OR (asset_type IS NOT NULL AND include_in_net_worth))",
+        "sum(balance_eq) FILTER (WHERE " + debt + " AND balance_eq > 0)",
+        "-sum(balance_eq) FILTER (WHERE " + debt + " AND balance_eq < 0)",
+        "bool_or(" + ok + "balance_eq IS NULL) FILTER (WHERE " + debt + ")",
+        "sum(balance_eq) FILTER (WHERE " + liquid + " OR " + debt + ")",
+    };
+}
+
+// Агрегаты итогов с COALESCE и приведением: суммы — текстом, признаки — bool.
+// over — окно ("()" / "(PARTITION BY date_index)") или пусто (GROUP BY).
+std::string balance_totals_select(const std::string& over, const std::string& row_ok) {
+    static const bool kIsFlag[] = {false, true, false, true, false, false, false, true, false};
+    auto aggs = balance_total_aggregates(row_ok);
+    std::string window = over.empty() ? "" : " OVER " + over;
+    std::string out;
+    for (std::size_t i = 0; i < aggs.size(); ++i) {
+        if (i) out += ", ";
+        out += kIsFlag[i] ? "COALESCE(" + aggs[i] + window + ", false)"
+                          : "COALESCE(" + aggs[i] + window + ", 0)::text";
+    }
+    return out;
+}
+
+// Оконная форма — итоги в каждой строке баланса (`extra` — row_ok выше).
+std::string balance_totals_sql(const std::string& over, const std::string& extra = "") {
+    return balance_totals_select(over, extra);
+}
+
+// Девять итогов из полей строки, начиная с first (порядок
+// balance_total_aggregates).
 void set_balance_totals(json& block, const std::vector<std::string>& f, std::size_t first) {
     block["total_eq"] = f.at(first);
     block["incomplete"] = f.at(first + 1) == "t";
     block["capital_eq"] = f.at(first + 2);
     block["capital_incomplete"] = f.at(first + 3) == "t";
     block["net_worth_eq"] = f.at(first + 4);
+    block["receivable_eq"] = f.at(first + 5);
+    block["payable_eq"] = f.at(first + 6);
+    block["debts_incomplete"] = f.at(first + 7) == "t";
+    block["with_debts_eq"] = f.at(first + 8);
 }
 
-json empty_balance_totals() {
-    return {{"total_eq", "0"}, {"incomplete", false}, {"capital_eq", "0"},
-            {"capital_incomplete", false}, {"net_worth_eq", "0"}};
+void set_balance_result_totals(BalanceResult& out, const std::vector<std::string>& f, std::size_t first) {
+    out.total_eq = f.at(first);
+    out.incomplete = f.at(first + 1) == "t";
+    out.capital_eq = f.at(first + 2);
+    out.capital_incomplete = f.at(first + 3) == "t";
+    out.net_worth_eq = f.at(first + 4);
+    out.receivable_eq = f.at(first + 5);
+    out.payable_eq = f.at(first + 6);
+    out.debts_incomplete = f.at(first + 7) == "t";
+    out.with_debts_eq = f.at(first + 8);
 }
 
 } // namespace
+
+json empty_balance_totals() {
+    return {{"total_eq", "0"},       {"incomplete", false},       {"capital_eq", "0"},
+            {"capital_incomplete", false}, {"net_worth_eq", "0"},  {"receivable_eq", "0"},
+            {"payable_eq", "0"},     {"debts_incomplete", false}, {"with_debts_eq", "0"}};
+}
+
+json balance_totals_json(const BalanceResult& r) {
+    return {{"total_eq", r.total_eq},
+            {"incomplete", r.incomplete},
+            {"capital_eq", r.capital_eq},
+            {"capital_incomplete", r.capital_incomplete},
+            {"net_worth_eq", r.net_worth_eq},
+            {"receivable_eq", r.receivable_eq},
+            {"payable_eq", r.payable_eq},
+            {"debts_incomplete", r.debts_incomplete},
+            {"with_debts_eq", r.with_debts_eq}};
+}
 
 std::optional<std::string> find_ledger_for_user(db::Database& db, const std::string& user_id) {
     auto res = db.exec(
@@ -154,13 +226,15 @@ AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, Acc
         "CASE WHEN ao.uuid IS NULL THEN 'category' ELSE 'wallet' END AS kind, "
         "a.system_kind, a.is_archived, encode(i.content_sha256, 'hex'), "
         "ao.currency_uuid, c.iso_code, c.symbol, c.\"precision\", "
-        "aa.asset_type, aa.include_in_net_worth "
+        "aa.asset_type, aa.include_in_net_worth, ad.counterparty_uuid "
         "FROM account a "
         "JOIN icon i ON i.uuid = a.icon_uuid "
         "LEFT JOIN account_operating ao "
         "  ON ao.ledger_id = a.ledger_id AND ao.uuid = a.uuid AND ao.deleted_at IS NULL "
         "LEFT JOIN account_asset aa "
         "  ON aa.ledger_id = ao.ledger_id AND aa.uuid = ao.uuid AND aa.deleted_at IS NULL "
+        "LEFT JOIN account_debt ad "
+        "  ON ad.ledger_id = ao.ledger_id AND ad.uuid = ao.uuid AND ad.deleted_at IS NULL "
         "LEFT JOIN currency c ON c.uuid = ao.currency_uuid "
         "WHERE a.ledger_id = $1 AND a.deleted_at IS NULL "
         "AND ($2::text = '' OR ($2::text = 'wallet') = (ao.uuid IS NOT NULL)) "
@@ -181,12 +255,14 @@ AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, Acc
         out_row["system_kind"] = std::stoi(row.fields.at(3));
         // capital-assets: у кошелька asset_type (null — ликвидный) и
         // include_in_net_worth (true у ликвидного), у категории оба null.
+        // debts: counterparty_uuid — у долгового кошелька, иначе null.
         if (row.fields.at(2) == "wallet") {
             set_asset_fields(out_row, row.fields.at(10), row.fields.at(11));
         } else {
             out_row["asset_type"] = nullptr;
             out_row["include_in_net_worth"] = nullptr;
         }
+        set_debt_field(out_row, row.fields.at(12));
         out.accounts.push_back(out_row);
     }
     return out;
@@ -198,7 +274,7 @@ BalanceResult balance_to_date(db::Database& db, const std::string& ledger_id,
     // похода в базу (см. reports_repo.hpp); пять итогов — balance_totals_sql.
     auto result = db.exec(
         "SELECT account_uuid, account_name, currency_uuid, symbol, \"precision\", "
-        "balance, balance_eq, asset_type, include_in_net_worth, " +
+        "balance, balance_eq, asset_type, include_in_net_worth, counterparty_uuid, " +
             balance_totals_sql("()") + " FROM f_balance_to_date($1, $2, $3)",
         {ledger_id, date, eq_currency_uuid});
 
@@ -210,16 +286,11 @@ BalanceResult balance_to_date(db::Database& db, const std::string& ledger_id,
     for (const auto& row : result.rows) {
         json out_row = row_to_json(row.fields, kColumns);
         set_asset_fields(out_row, row.fields.at(7), row.fields.at(8));
+        set_debt_field(out_row, row.fields.at(9));
         out.rows.push_back(out_row);
     }
-    if (!result.rows.empty()) {
-        const auto& f = result.rows[0].fields;
-        out.total_eq = f.at(9);
-        out.incomplete = f.at(10) == "t";
-        out.capital_eq = f.at(11);
-        out.capital_incomplete = f.at(12) == "t";
-        out.net_worth_eq = f.at(13);
-    }
+    // Девять итогов (balance_totals_sql), начиная с поля 10.
+    if (!result.rows.empty()) set_balance_result_totals(out, result.rows[0].fields, 10);
     return out;
 }
 
@@ -728,9 +799,11 @@ std::optional<std::string> parse_operations_filter(const std::string& category_u
         return std::string("category_uuid и exclude_category_uuid нельзя задавать вместе");
     }
     if (auto err = parse_uuid_list("wallet_uuid", wallet_uuid, out.wallet_uuids)) return err;
+    // debt (change debts) — тем же правилом, что revaluation: функция ленты
+    // знает его, а kind = transfer долговые переводы больше не находит.
     if (!kind.empty() && kind != "expense" && kind != "income" && kind != "transfer" &&
-        kind != "revaluation") {
-        return std::string("kind должен быть expense, income, transfer или revaluation");
+        kind != "revaluation" && kind != "debt") {
+        return std::string("kind должен быть expense, income, transfer, revaluation или debt");
     }
     out.kind = kind;
     std::vector<std::string> qs;
@@ -772,10 +845,15 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
                                         const std::string& eq_currency_uuid, int limit,
                                         const std::string& cursor_date, const std::string& cursor_uuid,
                                         const OperationsFilter& filter) {
+    // f. — колонки функции: ниже LEFT JOIN account_debt, у которой тоже есть
+    // comment. Последняя колонка — counterparty_uuid (debts, design D4): у
+    // строки kind = 'debt' — контрагент её долговой стороны (ровно одна из
+    // from/to — долговой кошелёк), у остальных — NULL.
     static const char* kSelectColumns =
-        "operation_uuid, \"date\", kind, amount, currency_uuid, symbol, \"precision\", "
-        "amount_eq, comment, category_uuid, category_name, icon_sha256, wallet_uuid, wallet_name, "
-        "from_uuid, from_name, to_uuid, to_name";
+        "f.operation_uuid, f.\"date\", f.kind, f.amount, f.currency_uuid, f.symbol, f.\"precision\", "
+        "f.amount_eq, f.comment, f.category_uuid, f.category_name, f.icon_sha256, f.wallet_uuid, f.wallet_name, "
+        "f.from_uuid, f.from_name, f.to_uuid, f.to_name, "
+        "CASE WHEN f.kind = 'debt' THEN COALESCE(dfr.counterparty_uuid, dto.counterparty_uuid) END";
     static const std::vector<std::string> kColumns = {
         "operation_uuid", "date",         "kind",         "amount",      "currency_uuid",
         "symbol",         "precision",    "amount_eq",    "comment",     "category_uuid",
@@ -811,8 +889,15 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
         params.push_back(cursor_uuid);
     }
     append_filter_args(filter, args, params);
-    db::Result result =
-        db.exec(std::string("SELECT ") + kSelectColumns + " FROM f_operations_for_period(" + args + ")", params);
+    // WITH ORDINALITY + ORDER BY — порядок страницы тот, что отдала функция
+    // (date DESC, uuid DESC), JOIN его не гарантирует.
+    db::Result result = db.exec(
+        std::string("SELECT ") + kSelectColumns + " FROM f_operations_for_period(" + args +
+            ") WITH ORDINALITY AS f "
+            "LEFT JOIN account_debt dfr ON dfr.ledger_id = $1 AND dfr.uuid = f.from_uuid AND dfr.deleted_at IS NULL "
+            "LEFT JOIN account_debt dto ON dto.ledger_id = $1 AND dto.uuid = f.to_uuid AND dto.deleted_at IS NULL "
+            "ORDER BY f.ordinality",
+        params);
 
     OperationsResult out;
     std::size_t take = result.rows.size();
@@ -828,7 +913,9 @@ OperationsResult operations_for_period(db::Database& db, const std::string& ledg
         out.next_cursor_uuid = last.at(0); // "operation_uuid"
     }
     for (std::size_t i = 0; i < take; ++i) {
-        out.rows.push_back(row_to_json(result.rows[i].fields, kColumns));
+        json op = row_to_json(result.rows[i].fields, kColumns);
+        set_debt_field(op, result.rows[i].fields.at(kColumns.size()));
+        out.rows.push_back(op);
         if (result.rows[i].fields.at(kAmountEqIdx).empty()) out.incomplete = true;
     }
 
@@ -854,10 +941,13 @@ WalletTurnoverResult wallet_turnover_for_period(db::Database& db, const std::str
     auto result = db.exec(
         "SELECT t.account_uuid, t.account_name, t.comment, t.is_archived, t.currency_uuid, t.symbol, "
         "t.\"precision\", t.icon_sha256, t.turnover_in, t.turnover_out, t.turnover_in_eq, t.turnover_out_eq, "
-        "aa.asset_type, bool_or(t.incomplete) OVER () AS incomplete "
+        "aa.asset_type, bool_or(t.incomplete) OVER () AS incomplete, ad.counterparty_uuid "
         "FROM f_wallet_turnover_for_period($1, $2, $3, $4) WITH ORDINALITY AS t "
         "LEFT JOIN account_asset aa "
         "  ON aa.ledger_id = $1 AND aa.uuid = t.account_uuid AND aa.deleted_at IS NULL "
+        // debts: тот же приём для признака долга — живая строка account_debt.
+        "LEFT JOIN account_debt ad "
+        "  ON ad.ledger_id = $1 AND ad.uuid = t.account_uuid AND ad.deleted_at IS NULL "
         "ORDER BY t.ordinality",
         {ledger_id, from, to, eq_currency_uuid});
 
@@ -877,6 +967,7 @@ WalletTurnoverResult wallet_turnover_for_period(db::Database& db, const std::str
         out_row["is_archived"] = row.fields.at(3) == "t";
         const std::string& asset_type = row.fields.at(kColumns.size());
         out_row["asset_type"] = asset_type.empty() ? json(nullptr) : json(std::stoi(asset_type));
+        set_debt_field(out_row, row.fields.at(kColumns.size() + 2));
         out.rows.push_back(out_row);
         if (row.fields.at(kColumns.size() + 1) == "t") out.incomplete = true;
     }
@@ -900,7 +991,7 @@ BalancesAtDatesResult balances_at_dates(db::Database& db, const std::string& led
 
     auto result = db.exec(
         "SELECT date_index, account_uuid, account_name, currency_uuid, symbol, \"precision\", "
-        "balance, balance_eq, asset_type, include_in_net_worth, " +
+        "balance, balance_eq, asset_type, include_in_net_worth, counterparty_uuid, " +
             balance_totals_sql("(PARTITION BY date_index)") + " FROM f_balance_to_dates($1, $2, $3)",
         {ledger_id, array_literal, eq_currency_uuid});
 
@@ -927,8 +1018,9 @@ BalancesAtDatesResult balances_at_dates(db::Database& db, const std::string& led
         std::vector<std::string> account_fields(row.fields.begin() + 1, row.fields.begin() + 8);
         json account = row_to_json(account_fields, kColumns);
         set_asset_fields(account, row.fields.at(8), row.fields.at(9));
+        set_debt_field(account, row.fields.at(10));
         block["accounts"].push_back(account);
-        set_balance_totals(block, row.fields, 10);
+        set_balance_totals(block, row.fields, 11);
     }
     return out;
 }
@@ -945,18 +1037,13 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
         // строка с account_uuid IS NULL) даёт sum = NULL -> COALESCE "0" и
         // bool_or = false, как и там.
         //
-        // Пять итогов — те же FILTER, что balance_totals_sql, но обычными
-        // агрегатами GROUP BY. Пустой бакет: asset_type IS NULL у его
-        // единственной строки, sum = NULL -> "0", bool_or исключает её
-        // условием account_uuid IS NOT NULL.
+        // Девять итогов — те же агрегаты, что balance_totals_sql
+        // (balance_total_aggregates), но обычными GROUP BY. Пустой бакет: у
+        // его единственной строки asset_type и counterparty_uuid NULL, sum =
+        // NULL -> "0", bool_or исключает её условием account_uuid IS NOT NULL.
         auto totals = db.exec(
-            "SELECT bucket_start, bucket_end, "
-            "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NULL), 0)::text, "
-            "COALESCE(bool_or(account_uuid IS NOT NULL AND balance_eq IS NULL) FILTER (WHERE asset_type IS NULL), false), "
-            "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NOT NULL), 0)::text, "
-            "COALESCE(bool_or(balance_eq IS NULL) FILTER (WHERE asset_type IS NOT NULL), false), "
-            "COALESCE(sum(balance_eq) FILTER (WHERE asset_type IS NULL OR include_in_net_worth), 0)::text "
-            "FROM f_balance_series($1, $2, $3, $4, $5) "
+            "SELECT bucket_start, bucket_end, " + balance_totals_select("", "account_uuid IS NOT NULL") +
+            " FROM f_balance_series($1, $2, $3, $4, $5) "
             "GROUP BY date_index, bucket_start, bucket_end ORDER BY date_index",
             {ledger_id, from, to, step, eq_currency_uuid});
         for (const auto& row : totals.rows) {
@@ -975,7 +1062,7 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
     // f_income_expense_by_month, см. её README).
     auto result = db.exec(
         "SELECT date_index, bucket_start, bucket_end, account_uuid, account_name, currency_uuid, "
-        "symbol, \"precision\", balance, balance_eq, asset_type, include_in_net_worth, " +
+        "symbol, \"precision\", balance, balance_eq, asset_type, include_in_net_worth, counterparty_uuid, " +
             balance_totals_sql("(PARTITION BY date_index)", "account_uuid IS NOT NULL") +
             " FROM f_balance_series($1, $2, $3, $4, $5)",
         {ledger_id, from, to, step, eq_currency_uuid});
@@ -997,7 +1084,7 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
             json bucket = {{"bucket_start", row.fields.at(1)},
                            {"bucket_end", row.fields.at(2)},
                            {"accounts", json::array()}};
-            set_balance_totals(bucket, row.fields, 12);
+            set_balance_totals(bucket, row.fields, 13);
             out.buckets.push_back(bucket);
             last_idx = idx;
         }
@@ -1005,6 +1092,7 @@ BalanceSeriesResult balance_series(db::Database& db, const std::string& ledger_i
         std::vector<std::string> account_fields(row.fields.begin() + 3, row.fields.begin() + 10);
         json account = row_to_json(account_fields, kColumns);
         set_asset_fields(account, row.fields.at(10), row.fields.at(11));
+        set_debt_field(account, row.fields.at(12));
         out.buckets.back()["accounts"].push_back(account);
     }
     return out;
@@ -1054,6 +1142,101 @@ AssetsResult assets_for_period(db::Database& db, const std::string& ledger_id, c
         out.revaluation_period_eq = f.at(20);
         out.value_eq = f.at(21);
         out.incomplete = f.at(22) == "t";
+    }
+    return out;
+}
+
+DebtsResult debts_for_period(db::Database& db, const std::string& ledger_id, const std::string& from,
+                             const std::string& to, const std::string& eq_currency_uuid) {
+    // Движение и баланс каждого кошелька считает f_debts_for_period
+    // (тождество balance_to = balance_from + inflow − outflow, один курс на
+    // p_to); здесь — группировка по контрагенту и итоги оконными агрегатами
+    // (design D3). cp_eq — итог контрагента: sum() пропускает кошельки без
+    // курса, NULL — ни один не пересчитан. Строки контрагента идут подряд —
+    // ORDER BY ставит их вместе, новый контрагент начинается со смены uuid.
+    auto result = db.exec(
+        "WITH d AS (SELECT * FROM f_debts_for_period($1, $2, $3, $4)), "
+        "w AS (SELECT d.*, "
+        "  sum(balance_to_eq) OVER (PARTITION BY counterparty_uuid) AS cp_eq, "
+        "  bool_or(balance_to_eq IS NULL) OVER (PARTITION BY counterparty_uuid) AS cp_incomplete, "
+        "  COALESCE(sum(balance_to_eq) FILTER (WHERE balance_to_eq > 0) OVER (), 0)::text AS receivable_eq, "
+        "  COALESCE(-sum(balance_to_eq) FILTER (WHERE balance_to_eq < 0) OVER (), 0)::text AS payable_eq, "
+        "  COALESCE(sum(balance_to_eq) OVER (), 0)::text AS total_eq, "
+        "  bool_or(balance_to_eq IS NULL) OVER () AS all_incomplete "
+        "  FROM d) "
+        "SELECT counterparty_uuid, counterparty_name, counterparty_archived, cp_eq::text, cp_incomplete, "
+        "account_uuid, account_name, account_archived, currency_uuid, symbol, \"precision\", "
+        "due_date::text, comment, balance_from, inflow, outflow, balance_to, "
+        "balance_to_eq, inflow_eq, outflow_eq, receivable_eq, payable_eq, total_eq, all_incomplete "
+        "FROM w "
+        "ORDER BY abs(cp_eq) DESC NULLS LAST, counterparty_name, counterparty_uuid, account_name, account_uuid",
+        {ledger_id, from, to, eq_currency_uuid});
+
+    auto nullable = [](const std::string& s) { return s.empty() ? json(nullptr) : json(s); };
+    DebtsResult out;
+    std::string current;
+    for (const auto& row : result.rows) {
+        const auto& f = row.fields;
+        if (out.counterparties.empty() || f.at(0) != current) {
+            current = f.at(0);
+            out.counterparties.push_back({
+                {"counterparty_uuid", f.at(0)},
+                {"name", f.at(1)},
+                {"is_archived", f.at(2) == "t"},
+                {"balance_eq", nullable(f.at(3))},
+                {"incomplete", f.at(4) == "t"},
+                {"accounts", json::array()},
+            });
+        }
+        out.counterparties.back()["accounts"].push_back({
+            {"account_uuid", f.at(5)},
+            {"account_name", f.at(6)},
+            {"is_archived", f.at(7) == "t"},
+            {"currency_uuid", f.at(8)},
+            {"symbol", f.at(9)},
+            {"precision", f.at(10)},
+            {"due_date", nullable(f.at(11))},
+            {"comment", f.at(12)},
+            {"balance_from", f.at(13)},
+            {"inflow", f.at(14)},
+            {"outflow", f.at(15)},
+            {"balance_to", f.at(16)},
+            {"balance_to_eq", nullable(f.at(17))},
+            {"inflow_eq", nullable(f.at(18))},
+            {"outflow_eq", nullable(f.at(19))},
+        });
+    }
+    if (!result.rows.empty()) {
+        const auto& f = result.rows[0].fields;
+        out.receivable_eq = f.at(20);
+        out.payable_eq = f.at(21);
+        out.balance_eq = f.at(22);
+        out.incomplete = f.at(23) == "t";
+    }
+    return out;
+}
+
+CounterpartiesResult list_counterparties(db::Database& db, const std::string& ledger_id, bool include_archived) {
+    // Контрагент без иконки — LEFT JOIN, icon_uuid/icon_sha256 null. Фильтр
+    // архивных — параметром, как у list_accounts.
+    auto res = db.exec(
+        "SELECT c.uuid, c.name, c.comment, c.is_archived, c.icon_uuid, encode(i.content_sha256, 'hex') "
+        "FROM counterparty c LEFT JOIN icon i ON i.uuid = c.icon_uuid "
+        "WHERE c.ledger_id = $1 AND c.deleted_at IS NULL AND ($2::boolean OR NOT c.is_archived) "
+        "ORDER BY c.name, c.uuid",
+        {ledger_id, include_archived ? "true" : "false"});
+    auto nullable = [](const std::string& s) { return s.empty() ? json(nullptr) : json(s); };
+    CounterpartiesResult out;
+    for (const auto& row : res.rows) {
+        const auto& f = row.fields;
+        out.counterparties.push_back({
+            {"uuid", f.at(0)},
+            {"name", f.at(1)},
+            {"comment", f.at(2)},
+            {"is_archived", f.at(3) == "t"},
+            {"icon_uuid", nullable(f.at(4))},
+            {"icon_sha256", nullable(f.at(5))},
+        });
     }
     return out;
 }
