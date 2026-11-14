@@ -25,6 +25,8 @@ if(WALLET_REPORT_BUILD_INTEGRATION_TESTS)
         ${WALLET_COMMON_DIR}/util/uuid.cpp
         ${WALLET_COMMON_DIR}/util/hex.cpp
         ${WALLET_COMMON_DIR}/util/log.cpp
+        ${WALLET_COMMON_DIR}/util/metrics.cpp
+        ${WALLET_COMMON_DIR}/util/pg_recover.cpp
     )
 
     target_include_directories(wallet_report_integration_tests PRIVATE
@@ -72,6 +74,8 @@ if(WALLET_REPORT_BUILD_LOADTEST_SEED)
         ${WALLET_COMMON_DIR}/util/uuid.cpp
         ${WALLET_COMMON_DIR}/util/hex.cpp
         ${WALLET_COMMON_DIR}/util/log.cpp
+        ${WALLET_COMMON_DIR}/util/metrics.cpp
+        ${WALLET_COMMON_DIR}/util/pg_recover.cpp
     )
 
     target_include_directories(wallet_report_loadtest_seed PRIVATE
