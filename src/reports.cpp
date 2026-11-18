@@ -440,22 +440,46 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
     // с ЛЮБЫМ из вариантов. Один q — как раньше.
     std::vector<std::string> q_values;
     for (std::size_t i = 0; i < req.get_param_value_count("q"); ++i) q_values.push_back(req.get_param_value("q", i));
+    // exclude_q — тоже повторяемый (operations-search-summary): комментарий с
+    // ЛЮБЫМ из вариантов отбрасывается.
+    std::vector<std::string> exclude_q_values;
+    for (std::size_t i = 0; i < req.get_param_value_count("exclude_q"); ++i) {
+        exclude_q_values.push_back(req.get_param_value("exclude_q", i));
+    }
     reports_repo::OperationsFilter filter;
     if (auto err = reports_repo::parse_operations_filter(
             req.get_param_value("category_uuid"), req.get_param_value("exclude_category_uuid"),
             req.get_param_value("wallet_uuid"),
-            req.get_param_value("kind"), q_values, filter)) {
+            req.get_param_value("kind"), q_values, exclude_q_values, filter)) {
         json_error(res, 400, *err);
         return;
     }
+    // summary=true — сводка и совпадения вне категорий; только строго «true» и
+    // только при фильтре (без фильтра ответ прежний).
+    const bool want_summary = filter.any() && req.get_param_value("summary") == "true";
+    // other_matches — только при q + category_uuid: иначе «совпадений вне
+    // фильтра категорий» нет по определению.
+    const bool want_other = want_summary && (!filter.q.empty() || !filter.qs.empty()) &&
+                            !filter.category_uuids.empty();
 
     reports_repo::OperationsResult result;
+    reports_repo::OperationsSummary summary;
+    json other_matches = json::array();
     if (!ctx->ledger_id.empty()) {
-        // Страница и итог — на одном соединении из пула (одна аренда).
-        result = reports_repo::operations_for_period(*state.reports_pool->acquire(), ctx->ledger_id,
-                                                       req.get_param_value("from"),
+        // Страница, итог и сводка — на одном соединении из пула (одна аренда).
+        auto lease = state.reports_pool->acquire();
+        result = reports_repo::operations_for_period(*lease, ctx->ledger_id, req.get_param_value("from"),
                                                        req.get_param_value("to"), ctx->eq_currency_uuid,
                                                        limit, cursor_date, cursor_uuid, filter);
+        if (want_summary) {
+            summary = reports_repo::operations_summary(*lease, ctx->ledger_id, req.get_param_value("from"),
+                                                       req.get_param_value("to"), ctx->eq_currency_uuid, filter);
+        }
+        if (want_other) {
+            other_matches = reports_repo::operations_other_matches(
+                *lease, ctx->ledger_id, req.get_param_value("from"), req.get_param_value("to"),
+                ctx->eq_currency_uuid, filter);
+        }
     } else if (filter.any()) {
         // Нет леджера — итог "0"/false/0 без запроса (значения по умолчанию).
         result.has_total = true;
@@ -472,6 +496,13 @@ void handle_operations(AppState& state, const httplib::Request& req, httplib::Re
         body["total_incomplete"] = result.total_incomplete;
         body["total_count"] = result.total_count;
     }
+    // Сводка: даты null, когда подходящих операций нет (в том числе без леджера).
+    if (want_summary) {
+        body["summary"] = {{"first_date", summary.first_date.empty() ? json(nullptr) : json(summary.first_date)},
+                           {"last_date", summary.last_date.empty() ? json(nullptr) : json(summary.last_date)},
+                           {"by_category", summary.by_category}};
+    }
+    if (want_other) body["other_matches"] = other_matches;
     // next_cursor_date/next_cursor_uuid — только когда есть следующая
     // страница (has_more): пустые поля вместо отсутствующих ключей путали бы
     // клиента ("пустая строка — это валидный курсор?" — нет, следующая

@@ -344,10 +344,14 @@ struct OperationsFilter {
     // вызов, что до миграции wallet-api 000032), два и больше — сюда (p_qs).
     // parse_operations_filter не заполняет q и qs одновременно.
     std::vector<std::string> qs;
+    // Исключение по тексту (operations-search-summary): операция, чей комментарий
+    // содержит ЛЮБОЙ из вариантов, отбрасывается. Всегда массив p_exclude_qs, даже
+    // из одного варианта (отдельного скалярного параметра у функции нет).
+    std::vector<std::string> exclude_qs;
 
     bool any() const {
         return !category_uuids.empty() || !exclude_category_uuids.empty() || !wallet_uuids.empty() ||
-               !kind.empty() || !q.empty() || !qs.empty();
+               !kind.empty() || !q.empty() || !qs.empty() || !exclude_qs.empty();
     }
 };
 
@@ -363,7 +367,19 @@ std::optional<std::string> parse_operations_filter(const std::string& category_u
                                                     const std::string& wallet_uuid,
                                                     const std::string& kind,
                                                     const std::vector<std::string>& q_values,
+                                                    const std::vector<std::string>& exclude_q_values,
                                                     OperationsFilter& out);
+
+// Без exclude_q (форма до operations-search-summary).
+inline std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
+                                                           const std::string& exclude_category_uuid,
+                                                           const std::string& wallet_uuid,
+                                                           const std::string& kind,
+                                                           const std::vector<std::string>& q_values,
+                                                           OperationsFilter& out) {
+    return parse_operations_filter(category_uuid, exclude_category_uuid, wallet_uuid, kind, q_values,
+                                   std::vector<std::string>{}, out);
+}
 
 // Один q — форма до search-text-variants (интеграционные тесты фильтров).
 inline std::optional<std::string> parse_operations_filter(const std::string& category_uuid,
@@ -395,6 +411,30 @@ struct OperationsTotal {
 OperationsTotal operations_total(db::Database& db, const std::string& ledger_id, const std::string& from,
                                  const std::string& to, const std::string& eq_currency_uuid,
                                  const OperationsFilter& filter);
+
+// Сводка по фильтру (operations-search-summary) — f_operations_by_category:
+// строка на категорию подходящих операций периода + границы дат по всему набору.
+// by_category — массив {category_uuid (null у прямых переводов и долгов),
+// category_name, total_eq, count} по убыванию total_eq. first_date/last_date —
+// ГГГГ-ММ-ДД самой ранней и самой поздней операции; пустые, если операций нет.
+// Те же условия, что у operations_total (согласованность — тест
+// operations_summary_matches_total).
+struct OperationsSummary {
+    std::string first_date;
+    std::string last_date;
+    nlohmann::json by_category = nlohmann::json::array();
+};
+
+OperationsSummary operations_summary(db::Database& db, const std::string& ledger_id, const std::string& from,
+                                     const std::string& to, const std::string& eq_currency_uuid,
+                                     const OperationsFilter& filter);
+
+// Совпадения вне фильтра категорий (other_matches): тот же фильтр, но
+// category_uuids уходят в exclude_category_uuids — остаются категории, которых
+// не было в запросе. Вызывающий проверяет, что category_uuids не пуст.
+nlohmann::json operations_other_matches(db::Database& db, const std::string& ledger_id, const std::string& from,
+                                        const std::string& to, const std::string& eq_currency_uuid,
+                                        const OperationsFilter& filter);
 
 // limit — сколько строк отдать максимум (вызывающий, reports.cpp, обязан
 // проверить диапазон ДО вызова — здесь не проверяется, как и валидность

@@ -778,6 +778,15 @@ void append_filter_args(const OperationsFilter& filter, std::string& args, std::
         }
         args += ", p_qs => ARRAY[" + items + "]::text[]";
     }
+    // Исключение по тексту — тем же приёмом (operations-search-summary).
+    if (!filter.exclude_qs.empty()) {
+        std::string items;
+        for (const auto& v : filter.exclude_qs) {
+            items += (items.empty() ? "" : ", ") + next();
+            params.push_back(v);
+        }
+        args += ", p_exclude_qs => ARRAY[" + items + "]::text[]";
+    }
 }
 
 } // namespace
@@ -787,6 +796,7 @@ std::optional<std::string> parse_operations_filter(const std::string& category_u
                                                     const std::string& wallet_uuid,
                                                     const std::string& kind,
                                                     const std::vector<std::string>& q_values,
+                                                    const std::vector<std::string>& exclude_q_values,
                                                     OperationsFilter& out) {
     out = OperationsFilter{};
     if (auto err = parse_uuid_list("category_uuid", category_uuid, out.category_uuids)) return err;
@@ -819,7 +829,72 @@ std::optional<std::string> parse_operations_filter(const std::string& category_u
     } else {
         out.qs = std::move(qs);
     }
+    // exclude_q — после q (design D6), те же проверки; тексты со своим именем.
+    std::vector<std::string> exclude_qs;
+    for (const auto& q : exclude_q_values) {
+        if (q.empty()) continue;
+        auto len = utf8_length(q);
+        if (!len || *len > kMaxQueryChars) return std::string("exclude_q: не длиннее 100 символов");
+        exclude_qs.push_back(q);
+    }
+    if (exclude_qs.size() > kMaxQueryValues) return std::string("exclude_q: не больше 10 значений");
+    out.exclude_qs = std::move(exclude_qs);
     return std::nullopt;
+}
+
+namespace {
+
+// Дата из timestamp Postgres текстом («2026-03-04 00:00:00») — ГГГГ-ММ-ДД.
+std::string date_part(const std::string& ts) {
+    return ts.size() >= 10 ? ts.substr(0, 10) : ts;
+}
+
+// Строки f_operations_by_category по фильтру. Те же именованные аргументы, что
+// у f_operations_total (append_filter_args), поэтому условия совпадают с итогом.
+db::Result by_category_rows(db::Database& db, const std::string& ledger_id, const std::string& from,
+                            const std::string& to, const std::string& eq_currency_uuid,
+                            const OperationsFilter& filter) {
+    std::vector<std::string> params = {ledger_id, from, to, eq_currency_uuid};
+    std::string args = "$1, $2, $3, $4";
+    append_filter_args(filter, args, params);
+    return db.exec("SELECT category_uuid, category_name, matched, total_eq, first_date, last_date "
+                   "FROM f_operations_by_category(" + args + ")",
+                   params);
+}
+
+} // namespace
+
+OperationsSummary operations_summary(db::Database& db, const std::string& ledger_id, const std::string& from,
+                                     const std::string& to, const std::string& eq_currency_uuid,
+                                     const OperationsFilter& filter) {
+    auto result = by_category_rows(db, ledger_id, from, to, eq_currency_uuid, filter);
+    OperationsSummary out;
+    for (const auto& row : result.rows) {
+        const auto& f = row.fields;
+        // SQL NULL приходит пустой строкой (db.hpp): у прямых переводов и долгов
+        // категории нет — null, а не "".
+        out.by_category.push_back({{"category_uuid", f.at(0).empty() ? json(nullptr) : json(f.at(0))},
+                                   {"category_name", f.at(1)},
+                                   {"total_eq", f.at(3).empty() ? "0" : f.at(3)},
+                                   {"count", std::stoll(f.at(2))}});
+        // Метки времени ISO — сравнение строк совпадает с хронологическим.
+        std::string first = date_part(f.at(4));
+        std::string last = date_part(f.at(5));
+        if (out.first_date.empty() || first < out.first_date) out.first_date = first;
+        if (out.last_date.empty() || last > out.last_date) out.last_date = last;
+    }
+    return out;
+}
+
+json operations_other_matches(db::Database& db, const std::string& ledger_id, const std::string& from,
+                              const std::string& to, const std::string& eq_currency_uuid,
+                              const OperationsFilter& filter) {
+    // Тот же запрос, но «только эти категории» превращается в «всё, кроме этих».
+    OperationsFilter other = filter;
+    other.exclude_category_uuids = filter.category_uuids;
+    other.category_uuids.clear();
+    auto summary = operations_summary(db, ledger_id, from, to, eq_currency_uuid, other);
+    return summary.by_category;
 }
 
 OperationsTotal operations_total(db::Database& db, const std::string& ledger_id, const std::string& from,
