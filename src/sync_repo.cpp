@@ -36,7 +36,9 @@ const std::vector<TableSpec>& push_tables() {
          {"currency_pair_uuid", "date", "rate"}, {"rate"}, {}, {"date"},
          {"ledger_id", "currency_pair_uuid", "date"},
          "ledger_id IS NOT NULL AND deleted_at IS NULL"},
-        {"currency_conversion", Scope::ReferenceOrLedger,
+        // Шаг маршрута пересчёта (change currency-conversion-routes, миграция 000043
+        // wallet-api): таблица только леджера — ключ конфликта (ledger_id, uuid).
+        {"currency_conversion", Scope::LedgerOnly,
          {"from_currency_uuid", "to_currency_uuid", "num", "currency_pair_uuid", "is_reverse"}},
         // content_sha256 — hex-строка на границе протокола (см. TableSpec::
         // hex_columns и blob.hpp/README, "Иконки"); само содержимое сюда не
