@@ -1416,6 +1416,135 @@ TEST(operations_total_matches_all_pages) {
 
 // Проверка ввода (spec «Проверка параметров фильтра») — чистая функция, без базы:
 // тексты 400 дословно. Через HTTP её зовёт handle_operations.
+// exclude_q (operations-search-summary): отбрасывает операции по любому из
+// вариантов — и из ленты, и из итога; пустой комментарий остаётся.
+TEST(operations_filter_exclude_q_drops_from_page_and_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    // «такси» без «аэропорт»: e1 «Такси домой» и u1 «такси без курса».
+    reports_repo::OperationsFilter f;
+    f.qs = {"такси", "кафе"};
+    f.exclude_qs = {"АЭРОПОРТ"};
+    f.kind = "expense";
+    CHECK(filtered_uuids(*reports_db, l, f) == sorted({l.e1, l.u1, l.e4}));
+    auto page = reports_repo::operations_for_period(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                     FilterLedger::kTo, l.eq_currency, 1000, "", "", f);
+    CHECK(page.has_total);
+    CHECK_EQ(page.total_count, 3LL);
+    CHECK(std::fabs((as_number(page.total_eq)) - (530.0)) < 0.001); // 450 + 80, u1 без курса не входит
+    CHECK(page.total_incomplete);
+
+    // Только исключение: пустой комментарий (e7) остаётся.
+    reports_repo::OperationsFilter only;
+    only.exclude_qs = {"такси", "кофе", "кафе", "няня", "ёлка"};
+    only.kind = "expense";
+    CHECK(filtered_uuids(*reports_db, l, only) == sorted({l.e7}));
+}
+
+TEST(operations_filter_parse_exclude_q) {
+    reports_repo::OperationsFilter f;
+    using V = std::vector<std::string>;
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", V{}, V{"", ""}, f).has_value());
+    CHECK(!f.any());
+    CHECK(!reports_repo::parse_operations_filter("", "", "", "", V{}, V{"", "машинк"}, f).has_value());
+    CHECK((f.exclude_qs == V{"машинк"}));
+    CHECK(f.any());
+
+    V eleven(11, "x");
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", "", V{}, eleven, f).value_or(""),
+             std::string("exclude_q: не больше 10 значений"));
+    std::string cyr101;
+    for (int i = 0; i < 101; ++i) cyr101 += "ж";
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", "", V{}, V{"a", cyr101}, f).value_or(""),
+             std::string("exclude_q: не длиннее 100 символов"));
+    // q проверяется раньше exclude_q (design D6).
+    CHECK_EQ(reports_repo::parse_operations_filter("", "", "", "", V(11, "x"), eleven, f).value_or(""),
+             std::string("q: не больше 10 значений"));
+}
+
+// Сводка: границы дат и разбивка по категориям по ВСЕМ подходящим операциям;
+// сумма и число по строкам — как у итога; операция без курса считается, но не суммируется.
+TEST(operations_summary_matches_total) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.q = "такси";
+    f.kind = "expense";
+    auto total = reports_repo::operations_total(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                FilterLedger::kTo, l.eq_currency, f);
+    auto s = reports_repo::operations_summary(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                              FilterLedger::kTo, l.eq_currency, f);
+    CHECK_EQ(s.first_date, std::string("2026-05-01"));
+    CHECK_EQ(s.last_date, std::string("2026-05-10")); // u1 «такси без курса»
+    REQUIRE(s.by_category.size() == 2);
+    // По убыванию суммы: Такси (e1 + e2 = 750), затем Разное (u1 без курса — 0).
+    CHECK_EQ(s.by_category[0].at("category_name").get<std::string>(), std::string("Такси"));
+    CHECK_EQ(s.by_category[0].at("category_uuid").get<std::string>(), l.k_taxi);
+    CHECK_EQ(s.by_category[0].at("count").get<long long>(), 2LL);
+    CHECK(std::fabs((as_number(s.by_category[0].at("total_eq").get<std::string>())) - (750.0)) < 0.001);
+    CHECK_EQ(s.by_category[1].at("category_name").get<std::string>(), std::string("Разное"));
+    CHECK_EQ(s.by_category[1].at("count").get<long long>(), 1LL);
+
+    double sum = 0;
+    long long count = 0;
+    for (const auto& r : s.by_category) {
+        sum += as_number(r.at("total_eq").get<std::string>());
+        count += r.at("count").get<long long>();
+    }
+    CHECK(std::fabs((sum) - (as_number(total.total_eq))) < 0.001);
+    CHECK_EQ(count, total.matched);
+}
+
+TEST(operations_summary_null_category_for_direct_transfer_and_empty_result) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter transfers;
+    transfers.kind = "transfer";
+    auto s = reports_repo::operations_summary(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                              FilterLedger::kTo, l.eq_currency, transfers);
+    REQUIRE(s.by_category.size() == 1);
+    CHECK(s.by_category[0].at("category_uuid").is_null());
+    CHECK_EQ(s.by_category[0].at("count").get<long long>(), 1LL);
+    CHECK_EQ(s.first_date, std::string("2026-05-07"));
+
+    reports_repo::OperationsFilter none;
+    none.q = "такого-комментария-нет";
+    auto e = reports_repo::operations_summary(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                              FilterLedger::kTo, l.eq_currency, none);
+    CHECK(e.first_date.empty());
+    CHECK(e.last_date.empty());
+    CHECK(e.by_category.empty());
+}
+
+// other_matches: тот же q, но категории из category_uuid исключены.
+TEST(operations_other_matches_lists_categories_outside_filter) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+    auto l = seed_filter_ledger(*db, *reports_db);
+
+    reports_repo::OperationsFilter f;
+    f.q = "такси";
+    f.kind = "expense";
+    f.category_uuids = {l.k_taxi};
+    auto other = reports_repo::operations_other_matches(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                        FilterLedger::kTo, l.eq_currency, f);
+    REQUIRE(other.size() == 1);
+    CHECK_EQ(other[0].at("category_name").get<std::string>(), std::string("Разное"));
+    CHECK_EQ(other[0].at("count").get<long long>(), 1LL);
+
+    // Все совпадения внутри фильтра — пусто.
+    f.category_uuids = {l.k_taxi, l.k_misc};
+    auto none = reports_repo::operations_other_matches(*reports_db, l.identity.ledger_id, FilterLedger::kFrom,
+                                                       FilterLedger::kTo, l.eq_currency, f);
+    CHECK(none.empty());
+}
+
 TEST(operations_filter_parse_rejects_bad_input_with_exact_texts) {
     reports_repo::OperationsFilter f;
     std::string u = uuidgen::v4();

@@ -523,6 +523,22 @@ paths:
             items: {type: string, maxLength: 100}
           example: ["стриж", "barber"]
           description: "Подстрока комментария: без учёта регистра, ё = е, без шаблонных символов (% и _ — буквально). Не длиннее 100 символов (символов, не байтов). Можно повторить до 10 раз (q=стриж&q=barber) — тогда операция подходит, если её комментарий содержит ЛЮБОЙ из вариантов; в итоге (total_eq, total_count) она считается один раз. Пустые значения отбрасываются."
+        - name: exclude_q
+          in: query
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 10
+            items: {type: string, maxLength: 100}
+          example: ["машинк"]
+          description: "Исключение по тексту: операция, чей комментарий содержит ЛЮБОЙ из вариантов (те же правила сопоставления, что у q), не попадает ни в страницу, ни в итог, ни в summary. Операция с пустым комментарием не исключается. Считается фильтром (с ним в ответе есть итог). Повторяется до 10 раз, пустые значения отбрасываются."
+        - name: summary
+          in: query
+          required: false
+          schema: {type: boolean}
+          description: "true — при хотя бы одном фильтре в ответе есть summary (даты и разбивка по категориям по всем подходящим операциям периода), а при непустом q и category_uuid — ещё other_matches. Любое другое значение равносильно отсутствию; без фильтра параметр ничего не меняет."
       responses:
         "401":
           description: Не аутентифицирован
@@ -541,7 +557,8 @@ paths:
             `wallet_uuid: некорректный uuid`, `wallet_uuid: не больше 50 значений`,
             `kind должен быть expense, income, transfer, revaluation или debt`,
             `q: не длиннее 100 символов` (в том числе битый UTF-8; у любого из вариантов),
-            `q: не больше 10 значений`.
+            `q: не больше 10 значений`, `exclude_q: не больше 10 значений`,
+            `exclude_q: не длиннее 100 символов` (после проверок q, в том же порядке).
           content:
             application/json: {schema: {$ref: "#/components/schemas/Error"}}
         "200":
@@ -1313,7 +1330,41 @@ components:
         total_count:
           type: integer
           description: "Есть только при фильтрах. Число подходящих операций периода (с прямыми переводами и операциями без курса). Одинаково на всех страницах."
+        summary:
+          $ref: "#/components/schemas/OperationsSummary"
+        other_matches:
+          type: array
+          items: {$ref: "#/components/schemas/OperationsCategoryTotal"}
+          description: "Есть только при summary=true, непустом q и category_uuid. Категории, которых нет в category_uuid, где комментарий тоже совпал с q (с учётом exclude_q, wallet_uuid, kind и периода). Нет таких — пустой массив, а не отсутствие поля."
       required: [operations, incomplete, has_more, eq_currency_uuid]
+
+    OperationsCategoryTotal:
+      type: object
+      properties:
+        category_uuid:
+          type: [string, "null"]
+          format: uuid
+          description: "null — у прямых переводов и долгов категории нет (одна общая строка)."
+        category_name: {type: string, description: "Пустая у строки с category_uuid = null."}
+        total_eq: {type: string, description: "Итог категории в eq_currency по тому же правилу знака, что total_eq ответа (с kind — сумма, без — сальдо). Операции без курса не входят."}
+        count: {type: integer, description: "Число подходящих операций категории (с операциями без курса)."}
+      required: [category_uuid, category_name, total_eq, count]
+
+    OperationsSummary:
+      type: object
+      description: |
+        Только при summary=true и хотя бы одном фильтре. По ВСЕМ подходящим операциям
+        периода, независимо от limit и курсора. Сумма total_eq и count по by_category
+        равна total_eq и total_count ответа. Без подходящих операций (в том числе без
+        леджера) first_date и last_date — null, by_category — пустой массив.
+      properties:
+        first_date: {type: [string, "null"], format: date, description: "Дата самой ранней подходящей операции, ГГГГ-ММ-ДД."}
+        last_date: {type: [string, "null"], format: date, description: "Дата самой поздней подходящей операции, ГГГГ-ММ-ДД."}
+        by_category:
+          type: array
+          items: {$ref: "#/components/schemas/OperationsCategoryTotal"}
+          description: "По убыванию total_eq."
+      required: [first_date, last_date, by_category]
 
     WalletTurnoverRow:
       type: object
