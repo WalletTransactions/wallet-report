@@ -17,6 +17,7 @@ if(WALLET_REPORT_BUILD_INTEGRATION_TESTS)
     add_executable(wallet_report_integration_tests
         test_main.cpp
         test_reports.cpp
+        test_currency_routes.cpp
 
         ${CMAKE_SOURCE_DIR}/src/db.cpp
         ${CMAKE_SOURCE_DIR}/src/reports_repo.cpp
