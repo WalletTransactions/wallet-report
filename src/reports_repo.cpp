@@ -268,6 +268,23 @@ AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, Acc
     return out;
 }
 
+DataRangeResult data_range(db::Database& db, const std::string& ledger_id) {
+    // Агрегат без GROUP BY всегда даёт ровно одну строку: у пустого леджера
+    // min/max — SQL NULL (пустая строка в db.hpp), count — 0. to_char режет время:
+    // потребителю нужна дата, как и в параметрах from/to остальных отчётов.
+    auto res = db.exec(
+        "SELECT to_char(min(date), 'YYYY-MM-DD'), to_char(max(date), 'YYYY-MM-DD'), count(*) "
+        "FROM operation WHERE ledger_id = $1 AND deleted_at IS NULL",
+        {ledger_id});
+    DataRangeResult out;
+    if (res.rows.empty()) return out;
+    const auto& f = res.rows[0].fields;
+    if (!f.at(0).empty()) out.first_date = f.at(0);
+    if (!f.at(1).empty()) out.last_date = f.at(1);
+    out.operations_count = std::stoll(f.at(2));
+    return out;
+}
+
 BalanceResult balance_to_date(db::Database& db, const std::string& ledger_id,
                                const std::string& date, const std::string& eq_currency_uuid) {
     // Агрегаты OVER () — по ВСЕМУ результату в каждой строке, без второго

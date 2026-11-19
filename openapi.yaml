@@ -906,6 +906,30 @@ paths:
           content:
             application/json: {schema: {$ref: "#/components/schemas/AccountsReport"}}
 
+  /api/reports/data-range:
+    get:
+      operationId: reportDataRange
+      summary: Диапазон данных леджера — первая и последняя дата операции и их число
+      description: |
+        Дата первой и последней живой (не удалённой) операции леджера и число
+        таких операций — одним агрегатом, без периода и `eq_currency`. Нужен
+        wallet-mcp (`ledger_overview`), чтобы сказать модели, за какой период в
+        леджере есть данные. Нет операций или нет леджера — 200, обе даты `null`,
+        `operations_count` 0.
+      tags: [reports]
+      security: [{bearerAuth: [], sessionCookie: []}]
+      parameters:
+        - $ref: "#/components/parameters/asUserId"
+      responses:
+        "401":
+          description: Не аутентифицирован
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Error"}}
+        "200":
+          description: Диапазон данных
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/DataRangeReport"}}
+
   /api/reports/icons:
     get:
       operationId: reportIcons
@@ -1529,6 +1553,13 @@ components:
           items: {$ref: "#/components/schemas/AccountRow"}
           description: "ORDER BY kind (кошельки первыми), name."
       required: [accounts]
+    DataRangeReport:
+      type: object
+      properties:
+        first_date: {type: [string, "null"], format: date, description: "Дата самой ранней живой операции (ГГГГ-ММ-ДД); null, если операций нет."}
+        last_date: {type: [string, "null"], format: date, description: "Дата самой поздней живой операции (ГГГГ-ММ-ДД); null, если операций нет."}
+        operations_count: {type: integer, minimum: 0, description: "Число живых операций за всё время."}
+      required: [first_date, last_date, operations_count]
     AccountRow:
       type: object
       properties:
