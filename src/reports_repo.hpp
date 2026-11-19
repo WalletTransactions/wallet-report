@@ -82,6 +82,21 @@ struct AccountsResult {
 AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, AccountKindFilter kind,
                              bool include_archived);
 
+// Диапазон данных леджера (GET /api/reports/data-range, change
+// add-data-range-endpoint) — для wallet-mcp (`ledger_overview`): с какой даты в
+// леджере вообще есть операции. Существующий /operations отдаёт страницы по
+// убыванию даты, и первую операцию через него найти можно только обходом всех
+// страниц; здесь один агрегат. «Живые» — deleted_at IS NULL, как у
+// list_user_stats.
+struct DataRangeResult {
+    // Даты ГГГГ-ММ-ДД (время операции не нужно) или null у пустого леджера.
+    nlohmann::json first_date = nullptr;
+    nlohmann::json last_date = nullptr;
+    long long operations_count = 0;
+};
+
+DataRangeResult data_range(db::Database& db, const std::string& ledger_id);
+
 struct ReportResult {
     nlohmann::json rows = nlohmann::json::array();
     // Текстом, как и приходит из libpq (TEXT result format, см. db.hpp) —

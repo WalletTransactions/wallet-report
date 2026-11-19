@@ -810,6 +810,25 @@ void handle_accounts(AppState& state, const httplib::Request& req, httplib::Resp
     res.set_content(json{{"accounts", result.accounts}}.dump(), kJsonContentType);
 }
 
+// Первая/последняя дата операции и их число (change add-data-range-endpoint) —
+// для wallet-mcp `ledger_overview`. Как /accounts: без периода и eq_currency,
+// пролог auth_and_ledger; леджера нет — 200 с null/0, а не ошибка.
+void handle_data_range(AppState& state, const httplib::Request& req, httplib::Response& res) {
+    applog::set_route("GET /api/reports/data-range"); // литерал из register_routes ниже
+    auto ledger_id = auth_and_ledger(state, req, res);
+    if (!ledger_id) return;
+
+    reports_repo::DataRangeResult result;
+    if (!ledger_id->empty()) {
+        result = reports_repo::data_range(*state.reports_pool->acquire(), *ledger_id);
+    }
+    res.set_content(json{{"first_date", result.first_date},
+                         {"last_date", result.last_date},
+                         {"operations_count", result.operations_count}}
+                        .dump(),
+                    kJsonContentType);
+}
+
 // Иконки, доступные ЭТОМУ пользователю (вкладка "Иконки" в "Отчётах",
 // wallet-web app.js — по прямому запросу, 2026-09-22): общий набор плюс свои
 // иконки его леджера — тот же list_icons, что и у handle_admin_icons ниже,
@@ -973,6 +992,9 @@ void register_routes(httplib::Server& svr, AppState& state) {
     });
     svr.Get("/api/reports/accounts", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_accounts(state, req, res);
+    });
+    svr.Get("/api/reports/data-range", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_data_range(state, req, res);
     });
     svr.Get("/api/reports/assets", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_assets(state, req, res);

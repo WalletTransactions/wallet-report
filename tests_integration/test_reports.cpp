@@ -631,6 +631,60 @@ TEST(income_expense_by_month_zero_fills_months_without_activity) {
     CHECK_EQ(result.months[2].at("income_eq").get<std::string>(), std::string("50.00"));
 }
 
+TEST(data_range_reports_first_last_date_and_count_of_live_operations) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    // Пустой леджер: даты null, счётчик 0 — не ошибка.
+    auto empty = reports_repo::data_range(*reports_db, identity.ledger_id);
+    CHECK(empty.first_date.is_null());
+    CHECK(empty.last_date.is_null());
+    CHECK(empty.operations_count == 0);
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string currency_uuid = uuidgen::v4();
+    std::string iso = "DR" + uuidgen::v4().substr(0, 1);
+    std::string wallet_uuid = uuidgen::v4();
+    std::string category_uuid = uuidgen::v4();
+    std::string deleted_uuid = uuidgen::v4();
+
+    json changes = {
+        {"currency", json::array({currency_row(currency_uuid, icon_uuid, iso)})},
+        {"account", json::array({account_row(wallet_uuid, icon_uuid, "Wallet " + wallet_uuid),
+                                  account_row(category_uuid, icon_uuid, "Cat " + category_uuid)})},
+        {"account_operating", json::array({account_operating_row(wallet_uuid, currency_uuid)})},
+        {"operation", json::array({
+             operation_row(uuidgen::v4(), "2026-01-15T10:00:00", wallet_uuid, category_uuid, "10.00"),
+             operation_row(uuidgen::v4(), "2026-03-10T23:30:00", wallet_uuid, category_uuid, "20.00"),
+             operation_row(uuidgen::v4(), "2026-02-01T00:00:00", wallet_uuid, category_uuid, "30.00"),
+             // Самая ранняя — будет удалена ниже: в диапазон не входит.
+             operation_row(deleted_uuid, "2025-12-01T09:00:00", wallet_uuid, category_uuid, "40.00"),
+         })},
+    };
+    auto push =
+        sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(), changes);
+    REQUIRE(push.http_status == 200);
+
+    auto full = reports_repo::data_range(*reports_db, identity.ledger_id);
+    CHECK_EQ(full.first_date.get<std::string>(), std::string("2025-12-01"));
+    CHECK_EQ(full.last_date.get<std::string>(), std::string("2026-03-10"));
+    CHECK(full.operations_count == 4);
+
+    // Tombstone — вся строка с deleted=true (NOT NULL колонки), как в тестах выше.
+    json tombstone =
+        operation_row(deleted_uuid, "2025-12-01T09:00:00", wallet_uuid, category_uuid, "40.00");
+    tombstone["deleted"] = true;
+    auto del_push = sync_repo::push_batch(*db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+                                          {{"operation", json::array({tombstone})}});
+    REQUIRE(del_push.http_status == 200);
+
+    auto live = reports_repo::data_range(*reports_db, identity.ledger_id);
+    CHECK_EQ(live.first_date.get<std::string>(), std::string("2026-01-15"));
+    CHECK_EQ(live.last_date.get<std::string>(), std::string("2026-03-10"));
+    CHECK(live.operations_count == 3);
+}
+
 TEST(expense_by_weekday_zero_fills_days_without_expense) {
     auto db = fixture::open();
     auto identity = fixture::make_identity(*db);
