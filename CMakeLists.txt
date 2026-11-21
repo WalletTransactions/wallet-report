@@ -107,6 +107,7 @@ add_executable(wallet_report
     ${WALLET_COMMON_DIR}/util/jwt_claims.cpp
     ${WALLET_COMMON_DIR}/util/jwks.cpp
     ${WALLET_COMMON_DIR}/util/dotenv.cpp
+    ${WALLET_COMMON_DIR}/net/tls.cpp
     ${WALLET_COMMON_DIR}/util/log.cpp
     ${WALLET_COMMON_DIR}/util/metrics.cpp
     ${WALLET_COMMON_DIR}/util/pg_recover.cpp
@@ -120,6 +121,7 @@ target_include_directories(wallet_report PRIVATE
 )
 
 target_compile_definitions(wallet_report PRIVATE
+    CPPHTTPLIB_OPENSSL_SUPPORT
     CPPHTTPLIB_ZLIB_SUPPORT
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
@@ -128,6 +130,7 @@ target_compile_options(wallet_report PRIVATE
 )
 
 target_link_libraries(wallet_report PRIVATE
+    OpenSSL::SSL
     OpenSSL::Crypto
     Threads::Threads
     PostgreSQL::PostgreSQL

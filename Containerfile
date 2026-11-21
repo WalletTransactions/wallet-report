@@ -73,6 +73,9 @@ COPY third_party/swagger-ui/ /app/vendor/swagger-ui/
 
 # LOG_DIR не задан -> util/log.cpp пишет в stdout/stderr на Linux (см. README
 # google-auth, раздел "Логирование" — тут то же самое).
+# Метка поддержки взаимного TLS (change add-internal-mtls, design D8).
+LABEL org.wallet.mtls="1"
+
 USER appuser
 EXPOSE 8084
 
