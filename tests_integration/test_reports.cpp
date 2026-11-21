@@ -2543,6 +2543,9 @@ TEST(list_accounts_splits_by_account_operating_and_filters_archived) {
     CHECK_EQ(c.at("currency_uuid").get<std::string>(), std::string(""));
     CHECK(c.at("asset_type").is_null());
     CHECK(c.at("include_in_net_worth").is_null());
+    // category_kind: умолчание колонки (account_row не задаёт вид) — 2, «оба».
+    CHECK_EQ(w.at("category_kind").get<int>(), 2);
+    CHECK_EQ(c.at("category_kind").get<int>(), 2);
 
     auto wallets = reports_repo::list_accounts(*reports_db, identity.ledger_id,
                                                reports_repo::AccountKindFilter::Wallet, false);

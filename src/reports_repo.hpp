@@ -73,7 +73,8 @@ struct AccountsResult {
     // {uuid, name, kind ("wallet"/"category"), system_kind (число 0/1/2/3,
     // 3 — «Переоценка»), is_archived (bool), icon_sha256, currency_uuid,
     // iso_code, symbol, precision, asset_type (число 1/2/3 или null),
-    // include_in_net_worth (bool у кошелька, null у категории)}, ORDER BY
+    // include_in_net_worth (bool у кошелька, null у категории),
+    // category_kind (число 0 расход / 1 доход / 2 оба)}, ORDER BY
     // kind (кошельки первыми), name. Валютные поля — пустые строки у
     // категорий (SQL NULL, см. db.hpp).
     nlohmann::json accounts = nlohmann::json::array();

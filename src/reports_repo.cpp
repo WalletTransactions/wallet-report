@@ -226,7 +226,7 @@ AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, Acc
         "CASE WHEN ao.uuid IS NULL THEN 'category' ELSE 'wallet' END AS kind, "
         "a.system_kind, a.is_archived, encode(i.content_sha256, 'hex'), "
         "ao.currency_uuid, c.iso_code, c.symbol, c.\"precision\", "
-        "aa.asset_type, aa.include_in_net_worth, ad.counterparty_uuid "
+        "aa.asset_type, aa.include_in_net_worth, ad.counterparty_uuid, a.category_kind "
         "FROM account a "
         "JOIN icon i ON i.uuid = a.icon_uuid "
         "LEFT JOIN account_operating ao "
@@ -263,6 +263,10 @@ AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, Acc
             out_row["include_in_net_worth"] = nullptr;
         }
         set_debt_field(out_row, row.fields.at(12));
+        // Вид категории (account.category_kind, wallet-api 000041): 0 — расход,
+        // 1 — доход, 2 — оба (у кошельков и системных статей всегда 2). Клиент
+        // по нему подбирает статьи при вводе операции; сервер вид не проверяет.
+        out_row["category_kind"] = std::stoi(row.fields.at(13));
         out.accounts.push_back(out_row);
     }
     return out;

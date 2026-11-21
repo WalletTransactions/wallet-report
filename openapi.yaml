@@ -1576,7 +1576,8 @@ components:
         asset_type: {type: [integer, "null"], enum: [1, 2, 3, null], description: "У кошелька — признак актива (null — ликвидный); у категории всегда null."}
         include_in_net_worth: {type: [boolean, "null"], description: "У кошелька — входит ли в «всего с капиталом» (у ликвидного true); у категории null."}
         counterparty_uuid: {type: [string, "null"], format: uuid, description: "У долгового кошелька — контрагент (живая строка account_debt, debts); у остальных кошельков и категорий null. По нему бот исключает долговые кошельки из выбора трат."}
-      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision, asset_type, include_in_net_worth, counterparty_uuid]
+        category_kind: {type: integer, enum: [0, 1, 2], description: "Вид счёта (account.category_kind): 0 — расход, 1 — доход, 2 — оба. У кошельков и системных статей всегда 2. Клиент по нему подбирает статьи при вводе операции; сервер сочетание не проверяет."}
+      required: [uuid, name, kind, system_kind, is_archived, icon_sha256, currency_uuid, iso_code, symbol, precision, asset_type, include_in_net_worth, counterparty_uuid, category_kind]
 
     DebtsReport:
       type: object
