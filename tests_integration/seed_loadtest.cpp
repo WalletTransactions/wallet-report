@@ -15,6 +15,7 @@
 // Результат — JSON-файл (LOADTEST_USERS_JSON) со списком заведённых
 // пользователей: вход для mint_tokens.sh (следующий шаг контура).
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -54,10 +55,33 @@ int env_int(const char* key, int fallback) {
 // Те же билдеры JSON-строк, что в test_reports.cpp — небольшой
 // самостоятельный дубль (не общий заголовок), тем же приёмом, что и весь
 // остальной проект: каждый .cpp здесь самодостаточен.
-json currency_row(const std::string& uuid, const std::string& icon_uuid, const std::string& iso_code,
-                   const std::string& name, const std::string& symbol) {
-    return json{{"uuid", uuid},       {"name", name},          {"iso_code", iso_code},
-                {"icon_uuid", icon_uuid}, {"symbol", symbol}, {"precision", 2}};
+// Пара base -> quote и её курсы (те же формы JSON, что в test_reports.cpp).
+json currency_pair_row(const std::string& uuid, const std::string& symbol, const std::string& base_uuid,
+                        const std::string& quote_uuid) {
+    return json{{"uuid", uuid},
+                {"symbol", symbol},
+                {"base_currency_uuid", base_uuid},
+                {"quote_currency_uuid", quote_uuid},
+                {"precision", 4}};
+}
+
+json currency_pair_rate_row(const std::string& pair_uuid, const std::string& date, const std::string& rate) {
+    return json{{"uuid", uuidgen::v4()}, {"currency_pair_uuid", pair_uuid}, {"date", date}, {"rate", rate}};
+}
+
+// Справочная (ledger_id IS NULL) валюта по ISO-коду. У реального пользователя счета ссылаются именно на
+// справочные валюты, а отчёты приводят суммы к справочной USD; раньше сид заводил СВОИ USD и EUR в каждом
+// леджере — это другие строки currency, «тождественного» курса USD→USD между ними нет, и каждая операция
+// уходила в самый медленный путь rate_fallback (замер wallet-report#29).
+std::string reference_currency(db::Database& db, const std::string& iso_code) {
+    auto res = db.exec("SELECT uuid::text FROM currency WHERE iso_code = $1 AND ledger_id IS NULL "
+                       "AND deleted_at IS NULL",
+                       {iso_code});
+    if (res.rows.empty()) {
+        throw std::runtime_error("нет справочной валюты " + iso_code +
+                                 " — миграции wallet-api накатаны? (000001 и далее заводят справочник)");
+    }
+    return res.rows.at(0).fields.at(0);
 }
 
 json account_row(const std::string& uuid, const std::string& icon_uuid, const std::string& name) {
@@ -122,8 +146,9 @@ SeededUser seed_one_user(db::Database& db, int index, const std::string& icon_uu
     // см. wallet-api/schema/table/currency.sql) — одни и те же коды у каждого
     // синтетического пользователя безопасны, push_batch сам подставляет
     // АУТЕНТИФИЦИРОВАННЫЙ ledger_id, не тот, что в теле запроса.
-    std::string usd = uuidgen::v4();
-    std::string eur = uuidgen::v4();
+    std::string usd = reference_currency(db, "USD");
+    std::string eur = reference_currency(db, "EUR");
+    std::string eur_usd_pair = uuidgen::v4();
 
     std::string wallet_usd_1 = uuidgen::v4();
     std::string wallet_usd_2 = uuidgen::v4();
@@ -135,8 +160,8 @@ SeededUser seed_one_user(db::Database& db, int index, const std::string& icon_uu
     std::string cat_utilities = uuidgen::v4();
 
     json setup = {
-        {"currency", json::array({currency_row(usd, icon_uuid, "USD", "US Dollar", "$"),
-                                   currency_row(eur, icon_uuid, "EUR", "Euro", "\xE2\x82\xAC")})},
+        // Своя пара EUR -> USD леджера поверх справочных валют; курсы — ниже, ежедневно за весь период.
+        {"currency_pair", json::array({currency_pair_row(eur_usd_pair, "EURUSD", eur, usd)})},
         {"account", json::array({
                         account_row(wallet_usd_1, icon_uuid, "Main wallet"),
                         account_row(wallet_usd_2, icon_uuid, "Savings"),
@@ -154,6 +179,27 @@ SeededUser seed_one_user(db::Database& db, int index, const std::string& icon_uu
                               })},
     };
     push_or_throw(db, identity.ledger_id, device_id, email, setup);
+
+    // Ежедневный курс EUR -> USD за весь период данных (+30 дней запаса до первой операции): как у реального
+    // пользователя с автообновляемыми курсами. Плавное движение вокруг 1.08 с небольшим шумом.
+    {
+        const auto rates_now = std::chrono::system_clock::now();
+        std::normal_distribution<double> noise(0.0, 0.004);
+        json rates = json::array();
+        auto flush_rates = [&]() {
+            if (rates.empty()) return;
+            push_or_throw(db, identity.ledger_id, device_id, email, json{{"currency_pair_rate", rates}});
+            rates = json::array();
+        };
+        for (int d = days_span + 30; d >= 0; --d) {
+            const double v = 1.08 + 0.06 * std::sin(d / 45.0) + noise(rng);
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "%.4f", v);
+            rates.push_back(currency_pair_rate_row(eur_usd_pair, format_date(rates_now - std::chrono::hours(24 * d)).substr(0, 10), buf));
+            if (rates.size() >= 500) flush_rates();
+        }
+        flush_rates();
+    }
 
     std::vector<std::string> wallets = {wallet_usd_1, wallet_usd_2, wallet_eur};
     std::vector<std::string> categories = {cat_groceries, cat_salary, cat_transport, cat_entertainment,
