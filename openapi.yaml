@@ -850,6 +850,13 @@ paths:
         снятым `show_in_equivalent` в списке остаются — пикер эквивалента
         фильтрует их на клиенте.
 
+        `preferred_eq_currency` — валюта эквивалента, сохранённая
+        пользователем токена (wallet-api `PUT /api/settings`, таблица
+        `user_settings`; при `as_user_id` — выбранного пользователя): ISO-код,
+        если такая валюта есть в этом же списке, иначе `null` (не выбрано,
+        валюты нет у леджера, таблица ещё не накатана). Выбор личный: у
+        участников одного леджера он свой.
+
         Список не зависит от периода — без `from`/`to`; без `eq_currency` —
         сам этот отчёт СУЩЕСТВУЕТ для того, чтобы им заполнить eq_currency,
         а не наоборот.
@@ -1543,7 +1550,10 @@ components:
           type: array
           items: {$ref: "#/components/schemas/CurrencyRow"}
           description: "Валюты, видимые этому леджеру, ORDER BY iso_code."
-      required: [currencies]
+        preferred_eq_currency:
+          type: [string, "null"]
+          description: "Сохранённая пользователем валюта эквивалента (ISO-код из wallet-api user_settings), если она есть в currencies; иначе null."
+      required: [currencies, preferred_eq_currency]
 
     AccountsReport:
       type: object

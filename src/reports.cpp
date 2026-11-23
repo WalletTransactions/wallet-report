@@ -77,8 +77,13 @@ struct Context {
 // узнать, из чего его вообще выбирать, было бы циклической зависимостью.
 // nullopt — хендлер уже ответил 401 сам; пустая строка — легитимно "леджера
 // ещё нет" (см. common_prolog выше, тот же смысл).
+//
+// subject_user_id (необязательный) — сюда кладётся пользователь, чей леджер
+// резолвится (сам владелец токена или as_user_id у админа): /currencies по
+// нему читает сохранённую валюту эквивалента (change user-eq-currency).
 std::optional<std::string> auth_and_ledger(AppState& state, const httplib::Request& req,
-                                            httplib::Response& res) {
+                                            httplib::Response& res,
+                                            std::string* subject_user_id = nullptr) {
     auto user = session::current_user(req, *state.jwks);
     if (!user) {
         json_error(res, 401, "unauthenticated");
@@ -86,6 +91,7 @@ std::optional<std::string> auth_and_ledger(AppState& state, const httplib::Reque
     }
     auto subject_id = resolve_subject_user_id(*user, req, res);
     if (!subject_id) return std::nullopt; // resolve_subject_user_id уже ответил (403)
+    if (subject_user_id != nullptr) *subject_user_id = *subject_id;
     auto ledger_id = reports_repo::find_ledger_for_user(*state.reports_pool->acquire(), *subject_id);
     return ledger_id.value_or(std::string{});
 }
@@ -768,11 +774,17 @@ void handle_balance_series(AppState& state, const httplib::Request& req, httplib
 // пролог).
 void handle_currencies(AppState& state, const httplib::Request& req, httplib::Response& res) {
     applog::set_route("GET /api/reports/currencies"); // литерал из register_routes ниже
-    auto ledger_id = auth_and_ledger(state, req, res);
+    std::string subject_id;
+    auto ledger_id = auth_and_ledger(state, req, res, &subject_id);
     if (!ledger_id) return;
 
     auto result = reports_repo::list_currencies(*state.reports_pool->acquire(), *ledger_id);
-    res.set_content(json{{"currencies", result.currencies}}.dump(), kJsonContentType);
+    // change user-eq-currency: выбор пользователя из user_settings wallet-api,
+    // только если такая валюта есть в этом же списке; иначе null.
+    auto preferred =
+        reports_repo::preferred_eq_currency(*state.reports_pool->acquire(), subject_id, result.currencies);
+    res.set_content(json{{"currencies", result.currencies}, {"preferred_eq_currency", preferred}}.dump(),
+                    kJsonContentType);
 }
 
 // Справочник кошельков и категорий (org/docs/TODO_telegram_bot.md, фаза 1,

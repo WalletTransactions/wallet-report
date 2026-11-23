@@ -1,7 +1,7 @@
 ## 1. Поле в справочнике валют
 
-- [ ] 1.1 `handle_currencies`: прочитать `user_settings.eq_currency_iso` пользователя токена (`sub`), отдать `preferred_eq_currency`, только если код есть в собранном списке, иначе `null`. Проверка: тесты по сценариям спеки (сохранено, не выбрано, нет у леджера, два участника); `ctest` зелёный
-- [ ] 1.2 `openapi.yaml`: `preferred_eq_currency` (`string`, nullable) в `CurrenciesReport`; README. Проверка: линт openapi, как в CI
+- [x] 1.1 `handle_currencies`: прочитать `user_settings.eq_currency_iso` пользователя токена (`sub`), отдать `preferred_eq_currency`, только если код есть в собранном списке, иначе `null`. Проверка: тесты по сценариям спеки (сохранено, не выбрано, нет у леджера, два участника); `ctest` зелёный
+- [x] 1.2 `openapi.yaml`: `preferred_eq_currency` (`string`, nullable) в `CurrenciesReport`; README. Проверка: линт openapi, как в CI
 
 ## 2. Выкат
 

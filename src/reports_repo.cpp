@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "util/log.hpp"
+
 using nlohmann::json;
 
 namespace reports_repo {
@@ -209,6 +211,29 @@ CurrenciesResult list_currencies(db::Database& db, const std::string& ledger_id)
         result.currencies.push_back(out_row);
     }
     return result;
+}
+
+json preferred_eq_currency(db::Database& db, const std::string& user_id, const json& currencies) {
+    // Отдельный запрос, а не JOIN в list_currencies: справочник валют не
+    // должен зависеть от того, накатана ли уже миграция wallet-api с
+    // user_settings (см. .hpp). SQL NULL драйвер отдаёт пустой строкой (см.
+    // db.hpp) — для "не выбрано" это то же, что нет строки вовсе.
+    std::string iso_code;
+    try {
+        auto res = db.exec("SELECT eq_currency_iso FROM user_settings WHERE user_id = $1", {user_id});
+        if (!res.rows.empty()) iso_code = res.rows[0].fields.at(0);
+    } catch (const db::QueryError& e) {
+        applog::warn("user_settings недоступна, preferred_eq_currency = null",
+                     {{"event", "preferred_eq_currency_unavailable"},
+                      {"sqlstate", e.sqlstate},
+                      {"error", e.what()}});
+        return nullptr;
+    }
+    if (iso_code.empty()) return nullptr;
+    for (const auto& row : currencies) {
+        if (row.at("iso_code").get<std::string>() == iso_code) return iso_code;
+    }
+    return nullptr;
 }
 
 AccountsResult list_accounts(db::Database& db, const std::string& ledger_id, AccountKindFilter kind,
