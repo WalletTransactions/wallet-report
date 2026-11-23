@@ -1,33 +1,347 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="wallet_report_integration_tests" tests="30" failures="0" time="4.1467">
-  <testcase classname="wallet_report_integration_tests" name="find_ledger_for_user_returns_nullopt_for_unknown_user" time="0.0386574"/>
-  <testcase classname="wallet_report_integration_tests" name="resolve_eq_currency_returns_nullopt_for_unknown_iso_code" time="0.117896"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_to_date_reflects_seeded_operation" time="0.259426"/>
-  <testcase classname="wallet_report_integration_tests" name="income_for_period_reflects_seeded_operation" time="0.215116"/>
-  <testcase classname="wallet_report_integration_tests" name="income_and_expense_for_period_net_cross_currency_transfer_legs" time="0.156123"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_sums_across_currencies_unlike_expense_for_period" time="0.174248"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_nets_cross_currency_transfer_legs" time="0.134808"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_computes_pct_without_comparison" time="0.145842"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_with_comparison_reports_pp_delta_and_dropped_category" time="0.139513"/>
-  <testcase classname="wallet_report_integration_tests" name="income_expense_by_month_zero_fills_months_without_activity" time="0.130988"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_by_weekday_zero_fills_days_without_expense" time="0.133812"/>
-  <testcase classname="wallet_report_integration_tests" name="expense_biggest_moves_ranks_by_absolute_delta_desc_and_respects_limit" time="0.193958"/>
-  <testcase classname="wallet_report_integration_tests" name="operations_for_period_classifies_kind_and_fills_category_or_wallet_by_side" time="0.121987"/>
-  <testcase classname="wallet_report_integration_tests" name="operations_for_period_pages_through_cursor_without_gaps_or_duplicates" time="0.194105"/>
-  <testcase classname="wallet_report_integration_tests" name="operations_for_period_incomplete_is_scoped_to_the_page" time="0.15875"/>
-  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_counts_transfers_and_zero_fills_untouched_wallet" time="0.146273"/>
-  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_includes_both_boundary_dates" time="0.143401"/>
-  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_returns_one_block_per_date_in_order_including_empty_ones" time="0.12221"/>
-  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_excludes_operation_exactly_on_the_requested_date" time="0.112081"/>
-  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_handles_duplicate_dates_in_request" time="0.202411"/>
-  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_marks_incomplete_when_rate_missing_for_one_wallet" time="0.0940069"/>
-  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_orders_accounts_within_one_date_by_eq_desc" time="0.104116"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_series_zero_fills_buckets_including_one_before_first_operation" time="0.120977"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_series_excludes_operation_exactly_on_bucket_boundary" time="0.112536"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_series_marks_incomplete_only_for_buckets_with_accounts" time="0.128108"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_series_orders_accounts_within_one_bucket_by_eq_desc" time="0.0975211"/>
-  <testcase classname="wallet_report_integration_tests" name="balance_series_totals_only_matches_per_account_totals" time="0.109089"/>
-  <testcase classname="wallet_report_integration_tests" name="list_currencies_includes_ledger_currency" time="0.0775767"/>
-  <testcase classname="wallet_report_integration_tests" name="list_currencies_without_ledger_returns_only_reference" time="0.125822"/>
-  <testcase classname="wallet_report_integration_tests" name="list_accounts_splits_by_account_operating_and_filters_archived" time="0.135342"/>
+<testsuite name="wallet_report_integration_tests" tests="89" failures="85" time="2.85363">
+  <testcase classname="wallet_report_integration_tests" name="find_ledger_for_user_returns_nullopt_for_unknown_user" time="0.0144324">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="resolve_eq_currency_returns_nullopt_for_unknown_iso_code" time="0.057971">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_to_date_reflects_seeded_operation" time="0.0554347">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="income_for_period_reflects_seeded_operation" time="0.0694152">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="income_and_expense_for_period_net_cross_currency_transfer_legs" time="0.0549713">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_sums_across_currencies_unlike_expense_for_period" time="0.0739877">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_for_period_nets_cross_currency_transfer_legs" time="0.107082">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_computes_pct_without_comparison" time="0.116867">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_for_period_with_comparison_reports_pp_delta_and_dropped_category" time="0.0870385">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="income_expense_by_month_zero_fills_months_without_activity" time="0.0854865">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="data_range_reports_first_last_date_and_count_of_live_operations" time="0.101563">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_weekday_zero_fills_days_without_expense" time="0.118987">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_biggest_moves_ranks_by_absolute_delta_desc_and_respects_limit" time="0.0996179">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_classifies_kind_and_fills_category_or_wallet_by_side" time="0.082186">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_pages_through_cursor_without_gaps_or_duplicates" time="0.125872">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_incomplete_is_scoped_to_the_page" time="0.068093">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_each_filter_and_combinations" time="0.0313691">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_wallet_side_and_cross_kind_uuids" time="0.0280996">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_foreign_ledger_uuid_finds_nothing" time="0.0201227">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_q_case_yo_and_literal_wildcards" time="0.0173472">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_q_variants_match_any_and_count_once" time="0.0165529">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_parse_q_variants" time="8.25e-06"/>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_pages_without_gaps_or_duplicates" time="0.0164732">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_total_sign_rule_incomplete_and_whole_period" time="0.016235">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_total_matches_all_pages" time="0.0161618">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_exclude_q_drops_from_page_and_total" time="0.0163189">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_parse_exclude_q" time="2.1628e-05"/>
+  <testcase classname="wallet_report_integration_tests" name="operations_summary_matches_total" time="0.0160912">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_summary_null_category_for_direct_transfer_and_empty_result" time="0.0168124">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_other_matches_lists_categories_outside_filter" time="0.0168713">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_parse_rejects_bad_input_with_exact_texts" time="6.4617e-05"/>
+  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_counts_transfers_and_zero_fills_untouched_wallet" time="0.0254075">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_for_period_includes_both_boundary_dates" time="0.0234068">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_returns_one_block_per_date_in_order_including_empty_ones" time="0.0408271">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_excludes_operation_exactly_on_the_requested_date" time="0.0725995">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_handles_duplicate_dates_in_request" time="0.0384209">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_marks_incomplete_when_rate_missing_for_one_wallet" time="0.0346051">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balances_at_dates_orders_accounts_within_one_date_by_eq_desc" time="0.0258921">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_zero_fills_buckets_including_one_before_first_operation" time="0.0240375">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_excludes_operation_exactly_on_bucket_boundary" time="0.0238866">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_marks_incomplete_only_for_buckets_with_accounts" time="0.0260798">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_orders_accounts_within_one_bucket_by_eq_desc" time="0.0239843">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_totals_only_matches_per_account_totals" time="0.0235772">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_includes_ledger_currency" time="0.0242555">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_returns_icon_uuid_and_numeric_precision" time="0.0242937">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_keeps_currency_hidden_from_equivalent" time="0.0243362">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_own_currency_overrides_reference_with_its_flag" time="0.0243051">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_currencies_without_ledger_returns_only_reference" time="0.0237662">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="preferred_eq_currency_returns_saved_code_present_in_list" time="0.0247376">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="preferred_eq_currency_is_null_when_not_saved" time="0.016814">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="preferred_eq_currency_is_null_when_saved_code_absent_from_list" time="0.0290698">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="preferred_eq_currency_is_per_user_within_shared_ledger" time="0.0294094">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="preferred_eq_currency_is_null_on_query_error" time="0.00450885">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_accounts_splits_by_account_operating_and_filters_archived" time="0.0236065">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_op_count" time="0.0167956">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_by_month_matches_structure" time="0.0164241">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_by_category_by_month_months" time="0.0164568">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_exclude_categories" time="0.0162441">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_filter_exclude_parse_texts" time="0.000104819"/>
+  <testcase classname="wallet_report_integration_tests" name="seed_asset_and_revaluation_category_via_push" time="0.016412">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_splits_liquid_capital_and_net_worth" time="0.0162098">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_asset_without_rate_marks_only_capital_incomplete" time="0.0250049">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_unmarked_asset_returns_to_liquid_total" time="0.0171733">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_for_period_classifies_revaluation" time="0.0165719">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="income_and_expense_exclude_revaluation" time="0.0164643">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="income_expense_by_month_and_weekday_exclude_revaluation" time="0.0177274">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="expense_structure_and_biggest_moves_exclude_revaluation" time="0.0170203">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="wallet_turnover_excludes_revaluation_and_marks_asset" time="0.0179056">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="list_accounts_marks_assets" time="0.0270217">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="assets_for_period_invested_revaluation_value_and_return" time="0.0239319">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="assets_for_period_sale_idle_asset_and_nothing_invested" time="0.0234782">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="assets_for_period_without_ledger_assets_is_empty" time="0.02593">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="sync_apply_order_matches_wallet_api" time="0.0165192">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_separates_debts_from_liquid_total" time="0.0187089">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_series_debt_totals_match_accounts_breakdown" time="0.0172118">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_giving_and_taking_loan_keeps_with_debts_total" time="0.0169012">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="balance_unmarked_debt_returns_to_liquid_total" time="0.0171226">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="operations_mark_debt_with_counterparty" time="0.0170939">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="accounts_turnover_mark_debt_and_flows_exclude_loans" time="0.0177507">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="debts_report_groups_by_counterparty_with_totals" time="0.0223637">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="debts_report_overpayment_and_empty_ledger" time="0.0207481">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="counterparties_hide_archived_by_default_and_are_read_only" time="0.0248938">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_equivalent_goes_through_explicit_route" time="0.0263034">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_equivalent_goes_through_usd_cross_by_default" time="0.0263284">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_direct_pair_beats_route_and_usd" time="0.017585">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_route_wins_over_usd" time="0.0236396">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_broken_route_gives_no_equivalent_and_blocks_usd" time="0.021784">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_no_pair_no_route_no_usd_gives_no_equivalent" time="0.018927">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
+  <testcase classname="wallet_report_integration_tests" name="routes_report_series_has_one_row_per_wallet_and_bucket" time="0.0234933">
+    <failure message="/src/tests_integration/test_main.cpp:61: необработанное исключение: не удалось подключиться к Postgres: connection to server at &quot;db&quot; (172.18.0.3), port 5432 failed: FATAL:  connection requires a valid client certificate
+"/>
+  </testcase>
 </testsuite>
