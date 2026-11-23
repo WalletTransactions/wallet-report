@@ -5,4 +5,4 @@
 
 ## 2. Выкат
 
-- [ ] 2.1 rc на test после wallet-api `user-eq-currency`. Проверка: после `PUT /api/settings {"eq_currency":"EUR"}` ответ `/api/reports/currencies` с тем же пользователем несёт `preferred_eq_currency: "EUR"`
+- [x] 2.1 rc на test после wallet-api `user-eq-currency`. Проверка: после `PUT /api/settings {"eq_currency":"EUR"}` ответ `/api/reports/currencies` с тем же пользователем несёт `preferred_eq_currency: "EUR"`
