@@ -108,6 +108,23 @@ echo "==> TLS к базе: ssl=$db_ssl, sslmode=$IT_DB_SSLMODE"
 # из READER_POSTGRES_PASSWORD контура; литерал из миграции — только у dev-стека.
 READER_PASSWORD="${READER_POSTGRES_PASSWORD:-wallet_reader}"
 
+# Клиентский сертификат wallet_reader (wallet-infra mtls.sh, имя it-tests): при mTLS
+# контура pg_hba требует clientcert=verify-ca у этой роли на любой базе кластера, в
+# том числе у wallet_api_it. Сертификат выпускает сам контур (только не в prod), здесь
+# он только монтируется. libpq берёт ключ лишь с правами 0600 у пользователя процесса,
+# а файл на хосте 0644 — поэтому пара копируется внутри контейнера перед запуском.
+IT_CERT_DIR="${IT_CERT_DIR:-${WALLET_STATE_ROOT:-$HOME/.local/state/wallet-envs}/${IT_DB_PROJECT#wallet-}/generated/mtls/it-tests}"
+reader_params="sslmode=${IT_DB_SSLMODE}"
+cert_run_args=()
+if [[ "$db_ssl" == "on" && -f "$IT_CERT_DIR/tls.key" ]]; then
+    reader_params="sslmode=verify-full&sslrootcert=/pgtls/ca.pem&sslcert=/pgtls/tls.crt&sslkey=/pgtls/tls.key"
+    cert_run_args=(-v "$IT_CERT_DIR:/in-pgtls:ro" --entrypoint sh)
+    echo "==> Клиентский сертификат wallet_reader: $IT_CERT_DIR"
+elif [[ "$db_ssl" == "on" ]]; then
+    echo "==> Нет $IT_CERT_DIR: при mTLS контура wallet_reader без сертификата не войдёт." >&2
+    echo "    Выпускает его wallet-infra (mtls.sh, it-tests) при up.sh/выкате контура." >&2
+fi
+
 echo "==> Миграции (идемпотентно — golang-migrate накатывает только новые)"
 "$ENGINE" run --rm --network "$db_network" \
     -v "$WORKSPACE_DIR/wallet-api/migrations:/migrations:ro" \
@@ -129,9 +146,17 @@ echo "==> Тесты"
 # (для Jenkins "junit" step, см. ../../../jobs/wallet-report-integration-tests/Jenkinsfile).
 # Контейнер образа тестов без USER (см. Containerfile рядом — root), поэтому
 # запись в bind-mount не упирается в права, в отличие от k6-образа.
+# С сертификатом — verify-full, как у сервисов (SAN серверного сертификата — db).
+test_cmd=()
+if [[ ${#cert_run_args[@]} -gt 0 ]]; then
+    test_cmd=(-c 'mkdir -p /pgtls && install -m 600 /in-pgtls/tls.key /pgtls/tls.key &&
+        install -m 644 /in-pgtls/tls.crt /in-pgtls/ca.pem /pgtls/ &&
+        exec /src/build/tests_integration/wallet_report_integration_tests')
+fi
 "$ENGINE" run --rm --network "$db_network" \
     -v "$SCRIPT_DIR:/results" \
+    "${cert_run_args[@]}" \
     -e DATABASE_URL="postgres://${MIGRATOR_POSTGRES_USER}:${MIGRATOR_POSTGRES_PASSWORD}@db:5432/${IT_DB_NAME}?sslmode=${IT_DB_SSLMODE}" \
-    -e REPORTS_DATABASE_URL="postgres://wallet_reader:${READER_PASSWORD}@db:5432/${IT_DB_NAME}?sslmode=${IT_DB_SSLMODE}" \
+    -e REPORTS_DATABASE_URL="postgres://wallet_reader:${READER_PASSWORD}@db:5432/${IT_DB_NAME}?${reader_params}" \
     -e JUNIT_XML_PATH=/results/junit.xml \
-    "$TEST_IMAGE"
+    "$TEST_IMAGE" "${test_cmd[@]}"
