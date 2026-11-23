@@ -57,6 +57,21 @@ struct CurrenciesResult {
 
 CurrenciesResult list_currencies(db::Database& db, const std::string& ledger_id);
 
+// Сохранённая пользователем валюта эквивалента (change user-eq-currency) —
+// поле preferred_eq_currency ответа /currencies. Читает
+// user_settings.eq_currency_iso (таблица wallet-api, GRANT SELECT для
+// wallet_reader) пользователя user_id и отдаёт этот ISO-код, только если он
+// есть среди iso_code в currencies (результат list_currencies выше), иначе
+// null: нет строки, NULL в колонке или такой валюты в списке нет. user_id —
+// пользователь токена (или as_user_id у админа), не леджер: участники одного
+// леджера выбирают валюту каждый себе.
+//
+// Ошибка запроса (таблицы ещё нет — wallet-report выкачен раньше миграции
+// wallet-api, или нет гранта) — warn в лог и null, а не исключение: поле
+// необязательное, ронять из-за него весь справочник незачем.
+nlohmann::json preferred_eq_currency(db::Database& db, const std::string& user_id,
+                                     const nlohmann::json& currencies);
+
 // Полный справочник кошельков и категорий леджера (GET /api/reports/accounts,
 // org/docs/TODO_telegram_bot.md, §0 и фаза 1, п. 7) — в отличие от
 // expense-structure/wallet-turnover, без привязки к периоду и обороту: боту

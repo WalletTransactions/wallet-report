@@ -11,8 +11,10 @@
 #include "reports_repo.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include "fixture.hpp"
@@ -2490,6 +2492,136 @@ TEST(list_currencies_without_ledger_returns_only_reference) {
         CHECK(row.at("is_own").is_boolean());
         CHECK(!row.at("is_own").get<bool>());
     }
+}
+
+// change user-eq-currency: preferred_eq_currency ответа /currencies —
+// user_settings.eq_currency_iso пользователя (таблица wallet-api), только если
+// такая валюта есть в списке. user_settings — не протокол синка, push_batch
+// её не пишет, поэтому строку кладём напрямую SQL полной ролью (DATABASE_URL),
+// а читаем, как в проде, ролью wallet_reader (её GRANT SELECT заодно
+// проверяется). Коды — в верхнем регистре: wallet-api приводит к нему при
+// записи (design D3).
+namespace {
+
+std::string unique_iso(const std::string& prefix) {
+    std::string iso = prefix + uuidgen::v4().substr(0, 6);
+    std::transform(iso.begin(), iso.end(), iso.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return iso;
+}
+
+// iso_code пустой — сохранить NULL («не выбрано» явной строкой).
+void save_eq_currency(db::Database& db, const std::string& user_id, const std::string& iso_code) {
+    if (iso_code.empty()) {
+        db.exec("INSERT INTO user_settings (user_id, eq_currency_iso) VALUES ($1, NULL)", {user_id});
+    } else {
+        db.exec("INSERT INTO user_settings (user_id, eq_currency_iso) VALUES ($1, $2)", {user_id, iso_code});
+    }
+}
+
+// Своя валюта леджера identity с данным кодом — через push_batch, как
+// остальные тесты справочника.
+void push_own_currency(db::Database& db, const fixture::TestIdentity& identity, const std::string& icon_uuid,
+                       const std::string& iso_code) {
+    auto push = sync_repo::push_batch(
+        db, identity.ledger_id, identity.device_id, uuidgen::v4(),
+        json{{"currency", json::array({currency_row(uuidgen::v4(), icon_uuid, iso_code)})}});
+    REQUIRE(push.http_status == 200);
+}
+
+} // namespace
+
+// «Сохранённая валюта эквивалента»: код есть в справочнике — он и в ответе.
+TEST(preferred_eq_currency_returns_saved_code_present_in_list) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string iso = unique_iso("EQ");
+    push_own_currency(*db, identity, icon_uuid, iso);
+    save_eq_currency(*db, identity.user_id, iso);
+
+    auto list = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    auto preferred = reports_repo::preferred_eq_currency(*reports_db, identity.user_id, list.currencies);
+    REQUIRE(preferred.is_string());
+    CHECK_EQ(preferred.get<std::string>(), iso);
+}
+
+// «Валюта не выбрана»: ни строки в user_settings, ни строки с NULL — null.
+TEST(preferred_eq_currency_is_null_when_not_saved) {
+    auto db = fixture::open();
+    auto reports_db = fixture::open_reports();
+
+    auto no_row = fixture::make_identity(*db);
+    auto list = reports_repo::list_currencies(*reports_db, no_row.ledger_id);
+    CHECK(reports_repo::preferred_eq_currency(*reports_db, no_row.user_id, list.currencies).is_null());
+
+    auto null_row = fixture::make_identity(*db);
+    save_eq_currency(*db, null_row.user_id, "");
+    list = reports_repo::list_currencies(*reports_db, null_row.ledger_id);
+    CHECK(reports_repo::preferred_eq_currency(*reports_db, null_row.user_id, list.currencies).is_null());
+}
+
+// «Валюты нет у леджера»: сохранённый код — своя валюта ДРУГОГО леджера, в
+// списке этого её нет — null, а не код, которого клиент не найдёт.
+TEST(preferred_eq_currency_is_null_when_saved_code_absent_from_list) {
+    auto db = fixture::open();
+    auto identity = fixture::make_identity(*db);
+    auto other = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string iso = unique_iso("AB");
+    push_own_currency(*db, other, icon_uuid, iso);
+    save_eq_currency(*db, identity.user_id, iso);
+
+    auto list = reports_repo::list_currencies(*reports_db, identity.ledger_id);
+    CHECK(reports_repo::preferred_eq_currency(*reports_db, identity.user_id, list.currencies).is_null());
+
+    // Тот же код в списке другого леджера — уже не null: дело именно в списке.
+    auto other_list = reports_repo::list_currencies(*reports_db, other.ledger_id);
+    auto preferred = reports_repo::preferred_eq_currency(*reports_db, identity.user_id, other_list.currencies);
+    REQUIRE(preferred.is_string());
+    CHECK_EQ(preferred.get<std::string>(), iso);
+}
+
+// «Общий леджер»: два участника одного леджера сохранили разное — каждый
+// получает своё (выбор по user_id, не по леджеру).
+TEST(preferred_eq_currency_is_per_user_within_shared_ledger) {
+    auto db = fixture::open();
+    auto owner = fixture::make_identity(*db);
+    auto member = fixture::make_identity(*db);
+    auto reports_db = fixture::open_reports();
+
+    db->exec("INSERT INTO ledger_member (ledger_id, user_id, role) VALUES ($1, $2, 'member')",
+             {owner.ledger_id, member.user_id});
+
+    std::string icon_uuid = fixture::make_reference_icon(*db);
+    std::string iso_owner = unique_iso("OW");
+    std::string iso_member = unique_iso("MB");
+    push_own_currency(*db, owner, icon_uuid, iso_owner);
+    push_own_currency(*db, owner, icon_uuid, iso_member);
+    save_eq_currency(*db, owner.user_id, iso_owner);
+    save_eq_currency(*db, member.user_id, iso_member);
+
+    auto list = reports_repo::list_currencies(*reports_db, owner.ledger_id);
+    auto for_owner = reports_repo::preferred_eq_currency(*reports_db, owner.user_id, list.currencies);
+    auto for_member = reports_repo::preferred_eq_currency(*reports_db, member.user_id, list.currencies);
+    REQUIRE(for_owner.is_string());
+    REQUIRE(for_member.is_string());
+    CHECK_EQ(for_owner.get<std::string>(), iso_owner);
+    CHECK_EQ(for_member.get<std::string>(), iso_member);
+}
+
+// Ошибка запроса к user_settings (в проде — таблицы ещё нет, wallet-report
+// выкачен раньше миграции wallet-api) не роняет справочник: null, без
+// исключения. Отсутствующую таблицу в общей тестовой базе не изобразить,
+// поэтому ошибку вызываем не-uuid в user_id (22P02) — тот же catch.
+TEST(preferred_eq_currency_is_null_on_query_error) {
+    auto reports_db = fixture::open_reports();
+    auto list = reports_repo::list_currencies(*reports_db, "");
+    CHECK(reports_repo::preferred_eq_currency(*reports_db, "not-a-uuid", list.currencies).is_null());
 }
 
 // Справочник для Telegram-бота (org/docs/TODO_telegram_bot.md, фаза 1, п. 7):
