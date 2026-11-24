@@ -97,10 +97,32 @@ fi
 # --- Сеять данные — контейнер в сети "db", подключается на db:5432 ролью
 #     WALLET_POSTGRES_USER (пишущая, НЕ wallet_reader). ---
 echo "==> Сею тестовые данные (LOADTEST_USERS=${LOADTEST_USERS:-5}, LOADTEST_OPS_PER_USER=${LOADTEST_OPS_PER_USER:-3000})"
+# TLS к базе (wallet-infra, change add-internal-mtls): при mTLS контура pg_hba требует
+# у роли wallet_api ещё и клиентский сертификат (clientcert=verify-ca). Берём пару
+# it-tests, которую контур выпускает для тестового инструментария (не в prod), — тот
+# же приём, что в ../tests_integration/run_local.sh. libpq берёт ключ только с правами
+# 0600, а на хосте он 0644 — поэтому копия внутри контейнера. ssl=off — как раньше.
+db_ssl="$("$ENGINE" exec "$LOADTEST_DB_CONTAINER" sh -c 'psql -U "$POSTGRES_USER" -d postgres -tAc "SHOW ssl"')"
+SEED_CERT_DIR="${SEED_CERT_DIR:-${WALLET_STATE_ROOT:-$HOME/.local/state/wallet-envs}/$LOADTEST_ENV/generated/mtls/it-tests}"
+seed_ssl="sslmode=disable"
+seed_cert_args=()
+seed_cert_copy=":"
+if [[ "$db_ssl" == "on" ]]; then
+    [[ -f "$SEED_CERT_DIR/tls.key" ]] || {
+        echo "Нет $SEED_CERT_DIR: при mTLS контура wallet_api без сертификата не войдёт (выпускает wallet-infra up.sh)." >&2
+        exit 1
+    }
+    seed_ssl="sslmode=verify-full&sslrootcert=/pgtls/ca.pem&sslcert=/pgtls/tls.crt&sslkey=/pgtls/tls.key"
+    seed_cert_args=(-v "$SEED_CERT_DIR:/in-pgtls:ro")
+    seed_cert_copy="mkdir -p /pgtls && install -m 600 /in-pgtls/tls.key /pgtls/tls.key && install -m 644 /in-pgtls/tls.crt /in-pgtls/ca.pem /pgtls/"
+fi
+echo "==> TLS к базе: ssl=$db_ssl"
 "$ENGINE" run --rm --network "$db_network" \
     -v "$WR_DIR:/wr" \
     -v "$WR_BUILD_VOL:/wr/build-loadtest" \
-    -e DATABASE_URL="postgresql://${WALLET_POSTGRES_USER}:${WALLET_POSTGRES_PASSWORD}@db:5432/${WALLET_POSTGRES_DB}" \
+    "${seed_cert_args[@]}" \
+    -e SEED_CERT_COPY="$seed_cert_copy" \
+    -e DATABASE_URL="postgresql://${WALLET_POSTGRES_USER}:${WALLET_POSTGRES_PASSWORD}@db:5432/${WALLET_POSTGRES_DB}?${seed_ssl}" \
     -e LOADTEST_USERS="${LOADTEST_USERS:-5}" \
     -e LOADTEST_OPS_PER_USER="${LOADTEST_OPS_PER_USER:-3000}" \
     -e LOADTEST_DAYS_SPAN="${LOADTEST_DAYS_SPAN:-730}" \
@@ -109,6 +131,7 @@ echo "==> Сею тестовые данные (LOADTEST_USERS=${LOADTEST_USERS:
     -w /wr \
     debian:bookworm-slim bash -c '
         apt-get update -qq && apt-get install -y --no-install-recommends -qq libpq5 >/dev/null
+        eval "$SEED_CERT_COPY"
         exec /wr/build-loadtest/tests_integration/wallet_report_loadtest_seed
     '
 
